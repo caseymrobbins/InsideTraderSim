@@ -81,13 +81,20 @@ class Agent:
         self._msg_counter = 0
         self._current_neighbors: List[str] = []  # set by Simulation each tick
 
-        # --- Adaptive communication bias ---
-        # Starts at 0 (neutral). Updated each tick from reward signal so the
-        # agent can drift toward or away from accurate communication without
-        # knowing that distortion = lying. No strategy is encoded here.
-        self._comm_bias: float = 0.0
+        # --- Communication Q-table (learned, no strategy pre-coded) ---
+        # State: (belief_confidence_bucket ∈ {0,1,2}) × (position_alignment ∈ {0,1,2})
+        #   confidence:  0=low(<0.3)  1=mid  2=high(≥0.7)
+        #   alignment:   0=against(position opposes belief, incentive to distort)
+        #                1=neutral(no significant position)
+        #                2=with(position aligns with belief)
+        # Actions: 0=TRUTHFUL  1=AMPLIFY  2=INVERT  3=SILENT
+        # Agents do not know what any action means — they discover it through reward.
+        self._comm_q: np.ndarray = np.zeros((3, 3, 4))
+        self._comm_epsilon: float = 0.5        # exploration rate, decays each tick
         self._prev_reward_signal: float = 0.0
-        # Outgoing tell tracking: (prop_key, communicated_value, target_tick)
+        self._last_comm_state: Optional[Tuple[int, int]] = None
+        self._last_comm_action: Optional[int] = None
+        # Outgoing tell tracking for outgoing_accuracy → HI_sus feedback
         self._sent_tells: List[Tuple[str, float, int]] = []
         self._outgoing_confirmed: int = 0
         self._outgoing_total: int = 0
@@ -167,38 +174,84 @@ class Agent:
             return self._make_ask(receiver, asset_idx, tick)
 
         key, value, confidence = best_prop
+        asset_idx = self._parse_asset_idx(key)
+        target_tick = self._parse_target_tick(key)
 
         utility_share = self._utility_of_sharing(key, confidence)
         utility_offer = self._utility_of_offering(key, confidence)
 
         if utility_offer > utility_share and self.cash > self.cfg.signal_base_cost:
-            msg_type = MessageType.OFFER
-            price = self.cfg.signal_base_cost * (1.0 + confidence)
-            communicated_value = value  # commercial offers: bias not applied
+            # Commercial offer: true value only — buyers verify on delivery
+            msg = Message(
+                msg_id=self._msg_counter,
+                sender=self.agent_id,
+                receiver=receiver,
+                msg_type=MessageType.OFFER,
+                tick=tick,
+                proposition_key=key,
+                predicted_value=value,
+                confidence=confidence,
+                price=self.cfg.signal_base_cost * (1.0 + confidence),
+            )
+            self._msg_counter += 1
+            self._pending_offers[msg.msg_id] = msg
+            return msg
+
+        # ── Free TELL: agent selects a communication action via Q-table ──
+        # The agent has no label for what each action does. It explores all
+        # four options and receives reward signal feedback each tick to
+        # discover which action is worth taking in which situation.
+        current_price = market_prices[asset_idx] if asset_idx is not None else value
+        expected_delta = value - current_price
+
+        # Encode state
+        conf_bucket = 0 if confidence < 0.3 else (2 if confidence >= 0.7 else 1)
+        pos = float(self.positions[asset_idx]) if asset_idx is not None else 0.0
+        if abs(pos) < 1.0 or abs(expected_delta) < 1e-6:
+            align_bucket = 1  # neutral
+        elif (pos > 0 and expected_delta > 0) or (pos < 0 and expected_delta < 0):
+            align_bucket = 2  # position agrees with belief
         else:
-            msg_type = MessageType.TELL
-            price = None
-            # Apply learned communication bias. The agent doesn't know this
-            # distorts truth — it's just its current communication scale.
-            communicated_value = value * (1.0 + self._comm_bias)
-            target_tick = self._parse_target_tick(key)
-            if target_tick is not None:
-                self._sent_tells.append((key, communicated_value, target_tick))
+            align_bucket = 0  # position opposes belief
+
+        state = (conf_bucket, align_bucket)
+        self._last_comm_state = state
+
+        # Epsilon-greedy action selection
+        if self.rng.random() < self._comm_epsilon:
+            action = int(self.rng.integers(0, 4))
+        else:
+            action = int(np.argmax(self._comm_q[state[0], state[1]]))
+        self._last_comm_action = action
+
+        # Action 3 = SILENT: skip the TELL, send an ASK instead
+        if action == 3:
+            return self._make_ask(receiver, int(self.rng.integers(0, self.cfg.n_assets)), tick)
+
+        # Map action to communicated value
+        # 0=TRUTHFUL  1=AMPLIFY(exaggerate direction)  2=INVERT(opposite direction)
+        if action == 0:
+            communicated_value = value
+        elif action == 1:
+            communicated_value = current_price + 2.0 * expected_delta
+        else:  # action == 2
+            communicated_value = current_price - expected_delta
+
+        if target_tick is not None:
+            self._sent_tells.append((key, communicated_value, target_tick))
 
         msg = Message(
             msg_id=self._msg_counter,
             sender=self.agent_id,
             receiver=receiver,
-            msg_type=msg_type,
+            msg_type=MessageType.TELL,
             tick=tick,
             proposition_key=key,
             predicted_value=communicated_value,
             confidence=confidence,
-            price=price,
+            price=None,
         )
         self._msg_counter += 1
-        if msg_type == MessageType.OFFER:
-            self._pending_offers[msg.msg_id] = msg
         return msg
 
     def _best_proposition_to_share(self, tick: int) -> Optional[Tuple[str, float, float]]:
@@ -491,7 +544,7 @@ class Agent:
         # Plain U model: no agency modulation on trading, but comm bias still adapts
         if self.reward_model.name == RewardModelName.U:
             utility = compute_base_utility(self, market_prices)
-            self._adapt_comm_bias(utility)
+            self._update_comm_q(utility)
             return {"trade_scale": 1.0, "venture_scale": 1.0, "info_scale": 1.0}
 
         # Compute agency indices
@@ -515,7 +568,7 @@ class Agent:
 
         utility = compute_base_utility(self, market_prices)
         reward = self.reward_model.compute(utility, agency)
-        self._adapt_comm_bias(reward)
+        self._update_comm_q(reward)
 
         if agency.in_danger_zone:
             # ── Danger zone ────────────────────────────────────────────
@@ -545,24 +598,26 @@ class Agent:
                 "agency": agency,
             }
 
-    def _adapt_comm_bias(self, current_reward: float) -> None:
+    def _update_comm_q(self, current_reward: float) -> None:
         """
-        Update the communication bias from the reward signal.
+        Strategy graph update: adjust weights on (situation, action) pairs.
 
-        If reward went up → reinforce whatever direction bias is currently in.
-        If reward went down → pull bias back toward 0 (more accurate / honest).
-        Near zero → inject tiny random exploration so bias can move off the origin.
-
-        No strategy is encoded: the agent doesn't know _comm_bias affects truth.
-        The reward model determines whether distortion is punished (UHFS) or free (U).
+        Each cell in _comm_q is the weight for one communication strategy
+        in one situation.  The weight of the strategy just used shifts toward
+        the observed reward delta — winning strategies grow heavier, losing
+        ones shrink.  Epsilon controls the mutation rate: early on agents
+        explore freely ('try this'); over time they commit to the highest-
+        weighted strategy in each situation.
         """
         reward_delta = current_reward - self._prev_reward_signal
-        if abs(self._comm_bias) < 1e-4:
-            self._comm_bias += 0.002 * float(self.rng.standard_normal())
-        else:
-            direction = math.copysign(1.0, reward_delta) * math.copysign(1.0, self._comm_bias)
-            self._comm_bias += 0.003 * direction
-            self._comm_bias = float(np.clip(self._comm_bias, -1.0, 1.0))
+        if self._last_comm_state is not None and self._last_comm_action is not None:
+            s0, s1 = self._last_comm_state
+            a = self._last_comm_action
+            # TD(0): weight ← weight + lr × (observed_delta − current_weight)
+            self._comm_q[s0, s1, a] += 0.1 * (reward_delta - self._comm_q[s0, s1, a])
+
+        # Decay mutation rate: early exploration gives way to exploitation
+        self._comm_epsilon = max(0.05, self._comm_epsilon * 0.995)
         self._prev_reward_signal = current_reward
 
     # ------------------------------------------------------------------
