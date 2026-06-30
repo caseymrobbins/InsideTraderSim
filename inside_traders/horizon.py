@@ -141,20 +141,53 @@ def _compute_solvency(agent: "Agent", market_prices: np.ndarray) -> float:
     return float(np.clip(ratio, _EPS, 1.0))
 
 
+_OPTIONS_TEMP: float = 1.0   # softness of the viability curve around q=0
+_OPTIONS_UNVISITED_PRIOR: float = 0.5  # an untried cell is "unknown", not "open"
+
+
 def _compute_options(agent: "Agent") -> float:
     """
-    Fraction of the agent's strategy-graph (Q-table) cells that remain
-    viable (weight >= 0). A fresh agent starts with an all-zero Q-table,
-    so every (situation, action) cell is still viable -> 1.0.
-    As the agent learns that certain strategies lead to bad outcomes in
-    certain situations, those cells go negative, shrinking the agent's
-    own usable action space — a direct, measurable proxy for option loss.
+    Viable mass of the agent's strategy graph (Q-table): how much of its
+    own action space it can still exercise without (subjectively) harming
+    itself, weighted by magnitude and only credited where actually tried.
+
+    Two failure modes a naive `fraction of cells >= 0` has, both fixed here:
+
+      1. Sign vs. magnitude: a cell at -0.01 and one at -50 are not equally
+         "destroyed", and a cell sitting at exactly 0 only looks "open"
+         because it has never been tested. We map each visited cell's
+         weight through a sigmoid (smooth, magnitude-sensitive) instead of
+         thresholding its sign, and give unvisited cells a neutral 0.5
+         prior — "unknown", not "available".
+
+      2. Reward-shaping toward paralysis: if untried cells counted as fully
+         open (1.0), the cheapest way to keep this score high would be to
+         never explore. Capping unvisited cells at the neutral prior (which
+         is *lower* than a confidently-good visited cell, 0.5 < sigmoid(+q))
+         means an agent has to actually exercise options to be credited for
+         having them — sitting still cannot maximize this term.
+
+    This stays purely a function of the agent's own subjective experience
+    (its own rewards), not of hidden ground truth — an agent has no
+    privileged access to whether it was deceived, only to what hurt it.
+    Whether the resulting compression actually localizes to deception
+    (rather than ordinary exploration noise) is a separate, falsifiable
+    question — see scripts/verify_options_localizes_to_deception.py.
     """
     q = getattr(agent, "_comm_q", None)
+    visits = getattr(agent, "_comm_q_visits", None)
     if q is None or q.size == 0:
         return 1.0
-    viable = float(np.sum(q >= 0.0)) / q.size
-    return float(np.clip(viable, _EPS, 1.0))
+    if visits is None:
+        # No visit tracking available: fall back to a magnitude-aware
+        # estimate treating every cell as visited (conservative under-prior).
+        viability = 1.0 / (1.0 + np.exp(-q / _OPTIONS_TEMP))
+        return float(np.clip(viability.mean(), _EPS, 1.0))
+
+    visited = visits > 0
+    viability = np.full(q.shape, _OPTIONS_UNVISITED_PRIOR, dtype=float)
+    viability[visited] = 1.0 / (1.0 + np.exp(-q[visited] / _OPTIONS_TEMP))
+    return float(np.clip(viability.mean(), _EPS, 1.0))
 
 
 # ──────────────────────────────────────────────────────────────────────
