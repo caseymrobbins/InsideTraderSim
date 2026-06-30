@@ -560,7 +560,7 @@ class Agent:
             # Determine which dimension is weakest → prioritise restoring it
             ia_vec = agency.ia_vector
             weakest = int(np.argmin(ia_vec))
-            # [0]=liquidity [1]=epistemic [2]=network [3]=solvency
+            # [0]=liquidity [1]=epistemic [2]=network [3]=solvency [4]=options
             return {
                 "trade_scale": 0.2,           # pull back from speculative trading
                 "venture_scale": 0.05,        # freeze new ventures

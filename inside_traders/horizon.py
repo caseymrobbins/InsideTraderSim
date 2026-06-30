@@ -4,11 +4,12 @@ HorizonSim Agency Indices
 
 Computes the four quantities used by the modulated reward equations:
 
-  I_a   — Agency vector: 4-dimensional, each ∈ (0, 1]
+  I_a   — Agency vector: 5-dimensional, each ∈ (0, 1]
             [0] liquidity   cash / initial_cash
             [1] epistemic   EH score (belief accuracy × uniqueness)
             [2] network     comm-graph degree / n_agents
             [3] solvency    net_worth / initial_wealth
+            [4] options     fraction of strategy-graph cells still viable (weight ≥ 0)
 
   HI_Ia — Horizon Index of agency: geometric mean of I_a
             HI_Ia = (∏ I_a_i)^(1/n) = exp(mean(log(I_a)))
@@ -42,11 +43,12 @@ _EPS: float = 1e-9             # numerical floor for logs
 @dataclass(frozen=True)
 class AgencyState:
     """Snapshot of an agent's agency indices at one tick."""
-    # Raw 4-vector
+    # Raw 5-vector
     ia_liquidity: float    # cash / initial_cash
     ia_epistemic: float    # epistemic health score
     ia_network: float      # degree / n_agents
     ia_solvency: float     # net_worth / initial_wealth
+    ia_options: float      # fraction of strategy-graph cells still viable (weight ≥ 0)
 
     # Derived indices
     min_ia: float          # bottleneck dimension (triggers danger zone)
@@ -61,7 +63,7 @@ class AgencyState:
     def ia_vector(self) -> np.ndarray:
         return np.array([
             self.ia_liquidity, self.ia_epistemic,
-            self.ia_network, self.ia_solvency,
+            self.ia_network, self.ia_solvency, self.ia_options,
         ])
 
 
@@ -82,9 +84,10 @@ def compute_agency_state(
     ia_epistemic = _compute_epistemic(agent)
     ia_network   = _compute_network(agent, n_agents, max_degree)
     ia_solvency  = _compute_solvency(agent, market_prices)
+    ia_options   = _compute_options(agent)
 
     # ── Derived ───────────────────────────────────────────────────────
-    ia_vec = np.array([ia_liquidity, ia_epistemic, ia_network, ia_solvency])
+    ia_vec = np.array([ia_liquidity, ia_epistemic, ia_network, ia_solvency, ia_options])
     min_ia = float(ia_vec.min())
     hi_ia  = float(np.exp(np.mean(np.log(ia_vec + _EPS))))  # geometric mean
 
@@ -96,6 +99,7 @@ def compute_agency_state(
         ia_epistemic=ia_epistemic,
         ia_network=ia_network,
         ia_solvency=ia_solvency,
+        ia_options=ia_options,
         min_ia=min_ia,
         hi_ia=hi_ia,
         fhi=fhi,
@@ -135,6 +139,22 @@ def _compute_solvency(agent: "Agent", market_prices: np.ndarray) -> float:
     initial = getattr(agent, "_initial_cash", max(agent.cash, 1.0))
     ratio = nw / max(initial, _EPS)
     return float(np.clip(ratio, _EPS, 1.0))
+
+
+def _compute_options(agent: "Agent") -> float:
+    """
+    Fraction of the agent's strategy-graph (Q-table) cells that remain
+    viable (weight >= 0). A fresh agent starts with an all-zero Q-table,
+    so every (situation, action) cell is still viable -> 1.0.
+    As the agent learns that certain strategies lead to bad outcomes in
+    certain situations, those cells go negative, shrinking the agent's
+    own usable action space — a direct, measurable proxy for option loss.
+    """
+    q = getattr(agent, "_comm_q", None)
+    if q is None or q.size == 0:
+        return 1.0
+    viable = float(np.sum(q >= 0.0)) / q.size
+    return float(np.clip(viable, _EPS, 1.0))
 
 
 # ──────────────────────────────────────────────────────────────────────
