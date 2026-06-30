@@ -82,8 +82,6 @@ class Agent:
         self._current_neighbors: List[str] = []  # set by Simulation each tick
 
         # --- Deception ---
-        # P(emit a believed-wrong claim) when a strong incentive exists; 0 = honest.
-        self.lie_propensity: float = 0.0
         # Ground-truth audit: (tick, receiver_id, proposition_key, true_value, asserted_value).
         # Never visible to other agents.
         self.lie_log: List[tuple] = []
@@ -164,15 +162,18 @@ class Agent:
 
         key, value, confidence = best_prop
 
-        # ── Deception (opt-in via lie_propensity) ────────────────────────
-        # Incentive proxy: the agent only bothers to deceive when it holds
-        # a high-confidence belief (i.e. it has an informational edge worth
-        # protecting). It then sends the *negated* price prediction with high
-        # confidence so the receiver mis-prices the asset. The lie is catchable:
-        # resolve_evidence() marks the receiver's evidence REFUTED when the
-        # actual price is revealed, dropping the liar's credibility score.
-        if self.lie_propensity > 0.0 and self.rng.random() < self.lie_propensity:
-            fake_value = -value  # direction-flip is the simplest detectable lie
+        # ── Deception ────────────────────────────────────────────────────
+        # Temptation is derived from the reward model's incentive structure —
+        # not a static field — because the cost of getting caught varies by model:
+        #   U     → no trust/credibility term in reward → full temptation
+        #   UF    → floor adds some self-preservation concern → slightly less
+        #   UH    → EH term: lying erodes the agent's own epistemic score → moderate
+        #   UHF   → floor + EH → lower still
+        #   UHFS  → HI_sus explicitly penalises credibility loss and betrayal
+        #           exposure, so lying directly degrades the agent's reward signal
+        p_lie = self._deception_probability()
+        if p_lie > 0.0 and self.rng.random() < p_lie:
+            fake_value = -value  # direction-flip: detectable when price resolves
             self.lie_log.append((tick, receiver, key, value, fake_value))
             msg = Message(
                 msg_id=self._msg_counter,
@@ -182,7 +183,7 @@ class Agent:
                 tick=tick,
                 proposition_key=key,
                 predicted_value=fake_value,
-                confidence=0.95,  # asserted with high confidence despite disbelief
+                confidence=0.95,
                 price=None,
             )
             self._msg_counter += 1
@@ -246,6 +247,37 @@ class Agent:
         )
         self._msg_counter += 1
         return msg
+
+    def _deception_probability(self) -> float:
+        """
+        Compute this agent's per-message probability of lying, derived from
+        the reward model's cost structure rather than a static field.
+
+        U     — no agency term at all: lying is free, full temptation (0.30)
+        UF    — floor adds mild self-preservation instinct (0.22)
+        UH    — EH term: lying erodes the agent's own epistemic health (0.14)
+        UHF   — floor + EH dampening (0.08)
+        UHFS  — HI_sus includes credibility health and betrayal exposure;
+                 being caught directly degrades the reward signal, so temptation
+                 scales with (1 - hi_sus): the more the agent has to lose the
+                 less it lies (floor at 0.02 even for a perfect hi_sus=1.0)
+        """
+        from .reward import RewardModelName
+        name = self.reward_model.name
+        if name == RewardModelName.U:
+            return 0.30
+        if name == RewardModelName.UF:
+            return 0.22
+        if name == RewardModelName.UH:
+            return 0.14
+        if name == RewardModelName.UHF:
+            return 0.08
+        # UHFS: lying degrades HI_sus directly — cost is proportional to how
+        # much the agent currently has to lose in the sustainability term.
+        # Coefficient 0.15 ensures p_lie < UHF (0.08) whenever hi_sus > 0.47,
+        # which holds for any agent that hasn't just been stripped of all trust.
+        hi_sus = self._last_agency.hi_sus if self._last_agency is not None else 0.5
+        return max(0.02, 0.15 * (1.0 - hi_sus))
 
     # ------------------------------------------------------------------
     # Step 3: Receive messages → Communication Evidence
