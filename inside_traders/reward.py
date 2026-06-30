@@ -10,7 +10,7 @@ U     | Plain base utility only             | R = Utility
 UF    | Base utility + Floor protection     | Danger zone: R = log(min(I_a))
 UH    | Base utility + HI term             | Safe: R = log(HI_Ia) + log(Utility)
 UHF   | Base utility + Floor + HI          | Floor + HI (no FHI / HI_sus scaling)
-UHFS  | Full modulated model                | [log(HI_Ia) + log(Utility)] × FHI × HI_sus
+UHFS  | Full modulated model                | log(HI_Ia) + log(U+ε) + α·log(FHI) + β·log(HI_sus)
 ------+-------------------------------------+---------------------------------------------
 
 The core equations (used verbatim from the spec):
@@ -19,7 +19,7 @@ The core equations (used verbatim from the spec):
       R = log(min(I_a))
 
   Safe Zone (min(I_a) ≥ θ):
-      R = [log(HI_Ia) + log(Utility)] × FHI × HI_sus
+      R = log(HI_Ia) + log(U+ε) + α·log(FHI) + β·log(HI_sus)
 
 Utility is defined as:
   Utility = net_worth / initial_wealth   (always positive, ≥ ε)
@@ -136,18 +136,29 @@ class RewardUHF(RewardModel):
 class RewardUHFS(RewardModel):
     """
     Danger zone  → R = log(min(I_a))
-    Safe zone    → R = [log(HI_Ia) + log(Utility)] × FHI × HI_sus
+    Safe zone    → R = log(HI_Ia) + log(U+ε) + α·log(FHI) + β·log(HI_sus)
 
-    Full modulation: epistemic quality + sustainability + future horizons.
+    Additive log formulation: each term contributes independently so no single
+    factor can collapse the reward to zero by going small.
+    α (fhi_weight) scales the forward-horizon contribution; β (hi_sus_weight)
+    scales the sustainability contribution.  Defaults are 1.0 for both.
     """
     name = RewardModelName.UHFS
+
+    def __init__(self, alpha: float = 1.0, beta: float = 1.0) -> None:
+        self.alpha = alpha  # weight on log(FHI)
+        self.beta = beta    # weight on log(HI_sus)
 
     def compute(self, utility: float, agency: "AgencyState") -> float:
         if agency.in_danger_zone:
             return math.log(agency.min_ia + _EPS)
         u = max(utility, _EPS)
-        inner = math.log(agency.hi_ia + _EPS) + math.log(u)
-        return inner * agency.fhi * agency.hi_sus
+        return (
+            math.log(agency.hi_ia + _EPS)
+            + math.log(u + _EPS)
+            + self.alpha * math.log(agency.fhi + _EPS)
+            + self.beta * math.log(agency.hi_sus + _EPS)
+        )
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -159,14 +170,23 @@ REWARD_MODELS: dict[RewardModelName, RewardModel] = {
     RewardModelName.UF:   RewardUF(),
     RewardModelName.UH:   RewardUH(),
     RewardModelName.UHF:  RewardUHF(),
-    RewardModelName.UHFS: RewardUHFS(),
+    RewardModelName.UHFS: RewardUHFS(),  # default α=β=1.0; use get_reward_model() for custom weights
 }
 
 
-def get_reward_model(name: str | RewardModelName) -> RewardModel:
-    """Retrieve a reward model by name (string or enum)."""
+def get_reward_model(
+    name: "str | RewardModelName",
+    alpha: float = 1.0,
+    beta: float = 1.0,
+) -> RewardModel:
+    """
+    Retrieve a reward model by name (string or enum).
+    alpha and beta are only used for UHFS (weights on log(FHI) and log(HI_sus)).
+    """
     if isinstance(name, str):
         name = RewardModelName(name)
+    if name == RewardModelName.UHFS:
+        return RewardUHFS(alpha=alpha, beta=beta)
     return REWARD_MODELS[name]
 
 

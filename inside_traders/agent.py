@@ -61,8 +61,12 @@ class Agent:
 
         # --- Reward model ---
         if reward_model is None:
-            from .reward import REWARD_MODELS, RewardModelName
-            reward_model = REWARD_MODELS[RewardModelName(cfg.reward_model)]
+            from .reward import get_reward_model
+            reward_model = get_reward_model(
+                cfg.reward_model,
+                alpha=cfg.reward_fhi_weight,
+                beta=cfg.reward_hi_sus_weight,
+            )
         self.reward_model: "RewardModel" = reward_model
 
         # --- Cognitive architecture ---
@@ -76,6 +80,13 @@ class Agent:
         self._pending_offers: Dict[int, Message] = {}
         self._msg_counter = 0
         self._current_neighbors: List[str] = []  # set by Simulation each tick
+
+        # --- Deception ---
+        # P(emit a believed-wrong claim) when a strong incentive exists; 0 = honest.
+        self.lie_propensity: float = 0.0
+        # Ground-truth audit: (tick, receiver_id, proposition_key, true_value, asserted_value).
+        # Never visible to other agents.
+        self.lie_log: List[tuple] = []
 
         # --- Metrics tracking ---
         self.trade_history: List[Fill] = []
@@ -152,6 +163,31 @@ class Agent:
             return self._make_ask(receiver, asset_idx, tick)
 
         key, value, confidence = best_prop
+
+        # ── Deception (opt-in via lie_propensity) ────────────────────────
+        # Incentive proxy: the agent only bothers to deceive when it holds
+        # a high-confidence belief (i.e. it has an informational edge worth
+        # protecting). It then sends the *negated* price prediction with high
+        # confidence so the receiver mis-prices the asset. The lie is catchable:
+        # resolve_evidence() marks the receiver's evidence REFUTED when the
+        # actual price is revealed, dropping the liar's credibility score.
+        if self.lie_propensity > 0.0 and self.rng.random() < self.lie_propensity:
+            fake_value = -value  # direction-flip is the simplest detectable lie
+            self.lie_log.append((tick, receiver, key, value, fake_value))
+            msg = Message(
+                msg_id=self._msg_counter,
+                sender=self.agent_id,
+                receiver=receiver,
+                msg_type=MessageType.TELL,
+                tick=tick,
+                proposition_key=key,
+                predicted_value=fake_value,
+                confidence=0.95,  # asserted with high confidence despite disbelief
+                price=None,
+            )
+            self._msg_counter += 1
+            return msg
+
         utility_share = self._utility_of_sharing(key, confidence)
         utility_offer = self._utility_of_offering(key, confidence)
 

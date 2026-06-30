@@ -75,6 +75,8 @@ class SimConfig:
     # ---- Reward model ----
     reward_model: str = "U"              # one of U / UF / UH / UHF / UHFS
     agency_floor: float = 0.10          # θ — danger-zone threshold on min(I_a)
+    reward_fhi_weight: float = 1.0      # α — log(FHI) weight in UHFS safe-zone equation
+    reward_hi_sus_weight: float = 1.0   # β — log(HI_sus) weight in UHFS safe-zone equation
 
     # ---- Experiment / compression seeding ----
     # These control the *initial* compression test (seed specific agents with
