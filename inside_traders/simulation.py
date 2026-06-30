@@ -1,6 +1,9 @@
-"""Main simulation engine."""
+"""Main simulation engine — HorizonSim v1 with GPU acceleration."""
 from __future__ import annotations
 import logging
+import os
+import sys
+import time
 from typing import Dict, List, Optional, Tuple
 import numpy as np
 
@@ -11,32 +14,84 @@ from .market import OrderBook
 from .communication import CommunicationGraph, Message, MessageType
 from .venture import Venture, VentureStatus
 from .metrics import MetricsCollector
-from .evidence import EvidenceStatus
+from .evidence import EvidenceStatus, Evidence, EvidenceType
+from .accelerator import (
+    get_array_module,
+    VectorizedAgentState,
+    gini_gpu,
+    _to_numpy,
+)
 
 logger = logging.getLogger(__name__)
+
+# ANSI colour helpers (stripped on non-tty automatically)
+_USE_COLOR = sys.stdout.isatty()
+_G  = "\033[32m" if _USE_COLOR else ""
+_Y  = "\033[33m" if _USE_COLOR else ""
+_C  = "\033[36m" if _USE_COLOR else ""
+_R  = "\033[31m" if _USE_COLOR else ""
+_B  = "\033[1m"  if _USE_COLOR else ""
+_RS = "\033[0m"  if _USE_COLOR else ""
+
+_BAR_CHARS = " ▁▂▃▄▅▆▇█"
+
+def _sparkbar(values: np.ndarray, width: int = 8) -> str:
+    """Tiny ASCII bar showing relative per-agent wealth (top-k)."""
+    if len(values) == 0:
+        return ""
+    mn, mx = values.min(), values.max()
+    rng = mx - mn if mx > mn else 1.0
+    bars = "".join(_BAR_CHARS[int((v - mn) / rng * 8)] for v in values[:width])
+    return bars
 
 
 class Simulation:
     """
     Orchestrates the full HorizonSim v1 simulation loop.
 
+    GPU acceleration (when device="cuda"):
+      - World GBM dynamics run via VectorizedWorld
+      - Agent position matrix + cash vector stored as device tensors
+      - Batch net-worth, Gini, POLI computed in single GPU kernel calls
+      - Cognitive state (BeliefGraph, EvidenceLedger) stays on CPU
+
+    Output schedule:
+      - Every status_interval ticks : one-line live console status
+      - Every plot_interval ticks   : mid-run dashboard PNG saved to plot_dir
+      - Every log_interval ticks    : MetricsCollector snapshot
+
     Tick structure:
-      1. Hidden states evolve.
+      1. Hidden states evolve (GPU).
       2. Distribute prediction cards.
-      3. Agents observe / buy signals → Observation Evidence.
-      4. Communication round.
-      5. Evidence resolution + belief/epistemic updates.
-      6. Planning and action execution (trading, ventures, info purchases).
-      7. Resolve matured contracts/ventures.
-      8. Metric snapshot.
+      3. Communication round.
+      4. Evidence resolution + belief/epistemic updates.
+      5. Compression test injection (if active).
+      6. Planning + action execution.
+      7. Resolve matured ventures.
+      8. GPU batch sync → metrics snapshot.
     """
 
     def __init__(self, cfg: Optional[SimConfig] = None) -> None:
         self.cfg = cfg or SimConfig()
         self.rng = np.random.default_rng(self.cfg.seed)
 
-        self.world = World(self.cfg, self.rng)
+        # ── Device setup ─────────────────────────────────────────────
+        self.xp, self.device = get_array_module(self.cfg.device)
+
+        # ── World ────────────────────────────────────────────────────
+        self.world = World(self.cfg, self.rng, xp=self.xp)
+
+        # ── Agents + vectorised state ────────────────────────────────
         self.agents: List[Agent] = self._init_agents()
+        initial_cash = np.array([ag.cash for ag in self.agents])
+        self.vstate = VectorizedAgentState(
+            n_agents=self.cfg.n_agents,
+            n_assets=self.cfg.n_assets,
+            initial_cash=initial_cash,
+            xp=self.xp,
+        )
+
+        # ── Market / communication / ventures ─────────────────────────
         self.order_book = OrderBook(
             n_assets=self.cfg.n_assets,
             initial_prices=self.world.fundamentals.copy(),
@@ -52,8 +107,15 @@ class Simulation:
         self.metrics = MetricsCollector()
         self.tick = 0
 
-        # Track which agents are compressed (for the compression test)
+        # ── Compression test ─────────────────────────────────────────
         self._compression_targets: List[str] = []
+
+        # ── Timing ───────────────────────────────────────────────────
+        self._t0: float = 0.0
+        self._tick_times: List[float] = []  # rolling last-N tick durations
+
+        # ── Plot dir ─────────────────────────────────────────────────
+        os.makedirs(self.cfg.plot_dir, exist_ok=True)
 
     # ------------------------------------------------------------------
     # Initialisation
@@ -61,13 +123,9 @@ class Simulation:
 
     def _init_agents(self) -> List[Agent]:
         agents = []
-        # Pareto-distributed initial wealth
         raw = self.rng.pareto(self.cfg.wealth_pareto_alpha, self.cfg.n_agents)
         raw = raw / raw.max()
-        wealth = (
-            self.cfg.wealth_min
-            + raw * (self.cfg.wealth_max - self.cfg.wealth_min)
-        )
+        wealth = self.cfg.wealth_min + raw * (self.cfg.wealth_max - self.cfg.wealth_min)
         for i in range(self.cfg.n_agents):
             agents.append(Agent(
                 agent_id=f"agent_{i}",
@@ -82,50 +140,55 @@ class Simulation:
     # ------------------------------------------------------------------
 
     def run(self) -> MetricsCollector:
-        logger.info("Starting simulation: %d agents, %d ticks", self.cfg.n_agents, self.cfg.n_ticks)
+        self._t0 = time.perf_counter()
+        _print_run_header(self.cfg, self.device)
 
         for t in range(1, self.cfg.n_ticks + 1):
             self.tick = t
+            tick_start = time.perf_counter()
             self._step()
+            tick_dur = time.perf_counter() - tick_start
+            self._tick_times.append(tick_dur)
+            if len(self._tick_times) > 50:
+                self._tick_times.pop(0)
 
+            # ── Metric snapshot every log_interval ───────────────────
             if t % self.cfg.log_interval == 0:
-                snap = self.metrics.snapshot(
-                    tick=t,
-                    agents=self.agents,
-                    market_prices=self.order_book.prices,
-                    active_ventures=[v for v in self.ventures if v.status == VentureStatus.ACTIVE],
-                    n_ticks_window=self.cfg.poli_influence_window,
-                )
-                if self.cfg.verbose:
-                    logger.info(
-                        "Tick %4d | wealth_total=%.1f | gini=%.3f | "
-                        "trust=%.3f | ventures=%d | deception=%.3f",
-                        t, snap.total_wealth, snap.gini,
-                        snap.mean_trust, snap.n_active_ventures,
-                        snap.deception_rate,
-                    )
+                prices_v = self.xp.asarray(self.order_book.prices, dtype=self.xp.float64)
+                snap = self._take_snapshot(t, prices_v)
 
-        logger.info("Simulation complete.")
+                # ── Live status every status_interval ────────────────
+                if t % self.cfg.status_interval == 0:
+                    self._print_status(t, snap, prices_v)
+
+                # ── Mid-run plots every plot_interval ─────────────────
+                if t % self.cfg.plot_interval == 0:
+                    self._save_midrun_plots(t)
+
+        elapsed = time.perf_counter() - self._t0
+        print(f"\n{_B}  Done.{_RS} {self.cfg.n_ticks} ticks in {elapsed:.2f}s "
+              f"({self.cfg.n_ticks/elapsed:.0f} ticks/sec) | device={self.device}")
         return self.metrics
+
+    # ------------------------------------------------------------------
+    # Per-tick step
+    # ------------------------------------------------------------------
 
     def _step(self) -> None:
         t = self.tick
 
-        # ── 1. Hidden states evolve ───────────────────────────────────
+        # ── 1. Hidden states evolve (on device) ──────────────────────
         self.world.step()
         self.order_book.reset_tick_volume()
 
-        # ── 2. Distribute free prediction cards ──────────────────────
-        n_cards_range = self.cfg.cards_per_tick_range
+        # ── 2. Distribute prediction cards ───────────────────────────
+        n_lo, n_hi = self.cfg.cards_per_tick_range
         for ag in self.agents:
-            n = int(self.rng.integers(n_cards_range[0], n_cards_range[1] + 1))
+            n = int(self.rng.integers(n_lo, n_hi + 1))
             cards = self.world.issue_free_cards(ag.agent_id, n)
             ag.receive_cards(cards, t)
 
-        # ── 3. Buy signals (if agent plans to) ───────────────────────
-        # Agents that bought signal in plan step (processed below after planning)
-
-        # ── 4. Communication round ────────────────────────────────────
+        # ── 3. Communication round ────────────────────────────────────
         messages: List[Message] = []
         for ag in self.agents:
             neighbors = self.comm_graph.neighbors(ag.agent_id)
@@ -133,7 +196,6 @@ class Simulation:
             if msg is not None:
                 messages.append(msg)
 
-        # Deliver messages and collect replies
         agent_map = {ag.agent_id: ag for ag in self.agents}
         replies: List[Message] = []
         for msg in messages:
@@ -143,20 +205,14 @@ class Simulation:
             reply = receiver.receive_message(msg, t)
             if reply is not None:
                 replies.append(reply)
-            # Track deception: TELL messages that will resolve
-            if msg.msg_type == MessageType.TELL and msg.proposition_key:
-                # We'll evaluate this at evidence resolution later; register intent
-                pass
 
-        # Deliver ACCEPT replies → info transfer + payment
         for reply in replies:
             if reply.msg_type == MessageType.ACCEPT:
-                sender = agent_map.get(reply.receiver)  # original offer sender
-                receiver = agent_map.get(reply.sender)   # acceptor
+                sender = agent_map.get(reply.receiver)
+                receiver = agent_map.get(reply.sender)
                 if sender and receiver and reply.price:
                     if receiver.pay(reply.price):
                         sender.receive_payment(reply.price)
-                        # Send the actual info to receiver
                         offer_msg = sender._pending_offers.get(reply.offer_id or -1)
                         if offer_msg:
                             receiver.receive_message(offer_msg, t)
@@ -165,7 +221,7 @@ class Simulation:
                 if orig_asker:
                     orig_asker.receive_message(reply, t)
 
-        # INTRODUCE: randomly connect some agents via mutual friends
+        # INTRODUCE
         for ag in self.agents:
             if self.rng.random() < self.cfg.introduce_prob:
                 neighbors = self.comm_graph.neighbors(ag.agent_id)
@@ -174,24 +230,21 @@ class Simulation:
                     self.comm_graph.introduce(a, b)
                     self.comm_graph.introduce(b, a)
 
-        # ── 5. Evidence resolution + belief updates ───────────────────
+        # ── 4. Evidence resolution + belief updates ───────────────────
         for ag in self.agents:
             ag.resolve_evidence(t, self.world.fundamentals)
-
-        # Measure deception: TELL messages where source's evidence got refuted
         self._update_deception_metrics(messages, agent_map, t)
 
-        # ── 6. Compression test injection ────────────────────────────
+        # ── 5. Compression test ───────────────────────────────────────
         if t == self.cfg.compression_test_start:
             self._select_compression_targets()
         if t >= self.cfg.compression_test_start and self._compression_targets:
             self._inject_bad_evidence(t)
 
-        # ── 7. Planning + action execution ───────────────────────────
+        # ── 6. Planning + execution ───────────────────────────────────
         for ag in self.agents:
             ag.update_intervention_view(t, self.order_book.prices)
             actions = ag.plan_actions(t, self.order_book.prices, self.ventures)
-
             for action in actions:
                 if action["type"] == "trade":
                     self._execute_trade(ag, action, t)
@@ -200,15 +253,86 @@ class Simulation:
                 elif action["type"] == "buy_signal":
                     self._buy_signal(ag, t)
 
-        # ── 8. Resolve matured ventures ───────────────────────────────
+        # ── 7. Resolve ventures ───────────────────────────────────────
         self._resolve_ventures(t)
 
-        # ── 9. Snapshot wealth ────────────────────────────────────────
+        # ── 8. Sync agent state → GPU tensor ──────────────────────────
+        self.vstate.push_from_agents(self.agents)
         for ag in self.agents:
             ag.snapshot_wealth(self.order_book.prices)
 
     # ------------------------------------------------------------------
-    # Action execution helpers
+    # Metric snapshot (GPU-accelerated batch computations)
+    # ------------------------------------------------------------------
+
+    def _take_snapshot(self, t: int, prices_v) -> object:
+        """Compute snapshot using GPU tensors where possible."""
+        net_worths_v = self.vstate.net_worths(prices_v)
+        poli_v = self.vstate.poli_scores(prices_v, self.cfg.poli_influence_window)
+
+        # EH must be computed on CPU (involves Python graph traversal)
+        eh_np = np.array([ag.epistemic_health(self.agents) for ag in self.agents])
+
+        snap = self.metrics.snapshot(
+            tick=t,
+            agents=self.agents,
+            market_prices=self.order_book.prices,
+            active_ventures=[v for v in self.ventures if v.status == VentureStatus.ACTIVE],
+            n_ticks_window=self.cfg.poli_influence_window,
+            # Optionally pass pre-computed GPU arrays for speed
+            _wealth_override=_to_numpy(net_worths_v),
+            _poli_override=_to_numpy(poli_v),
+            _eh_override=eh_np,
+        )
+        return snap
+
+    # ------------------------------------------------------------------
+    # Live status output
+    # ------------------------------------------------------------------
+
+    def _print_status(self, t: int, snap, prices_v) -> None:
+        net_worths_v = self.vstate.net_worths(prices_v)
+        wealth_np = _to_numpy(net_worths_v)
+        top5 = np.sort(wealth_np)[::-1][:5]
+        gini = gini_gpu(net_worths_v, self.xp)
+        avg_tick_ms = 1000 * np.mean(self._tick_times) if self._tick_times else 0.0
+        elapsed = time.perf_counter() - self._t0
+        eta = (self.cfg.n_ticks - t) * avg_tick_ms / 1000.0
+
+        n_active = sum(1 for v in self.ventures if v.status == VentureStatus.ACTIVE)
+        compression_flag = (
+            f" {_R}[COMPRESS]{_RS}" if t >= self.cfg.compression_test_start else ""
+        )
+
+        # Build the status line
+        bar = _sparkbar(np.sort(wealth_np)[::-1])
+        prices_str = " ".join(f"{p:.0f}" for p in self.order_book.prices[:3])
+        print(
+            f"{_B}tick {t:>4}/{self.cfg.n_ticks}{_RS}"
+            f" │ {_G}wealth_tot={snap.total_wealth:>10.1f}{_RS}"
+            f" │ {_Y}gini={gini:.3f}{_RS}"
+            f" │ {_C}trust={snap.mean_trust:.3f}{_RS}"
+            f" │ decept={snap.deception_rate:.3f}"
+            f" │ ventures={n_active:>2}"
+            f" │ px=[{prices_str}…]"
+            f" │ {avg_tick_ms:.1f}ms/tk"
+            f" │ ETA={eta:.0f}s"
+            f"{compression_flag}"
+            f"  {bar}",
+            flush=True,
+        )
+
+    # ------------------------------------------------------------------
+    # Mid-run dashboard plot (every plot_interval ticks)
+    # ------------------------------------------------------------------
+
+    def _save_midrun_plots(self, t: int) -> None:
+        from . import visualization as viz
+        path = viz.plot_midrun_dashboard(self, t, self.cfg.plot_dir)
+        print(f"  {_C}[plot]{_RS} {path}", flush=True)
+
+    # ------------------------------------------------------------------
+    # Action execution helpers (unchanged logic, same as before)
     # ------------------------------------------------------------------
 
     def _execute_trade(self, agent: Agent, action: Dict, tick: int) -> None:
@@ -217,7 +341,6 @@ class Simulation:
         price = self.order_book.prices[asset_idx]
         cost = abs(quantity) * price
 
-        # Check solvency
         if quantity > 0 and agent.cash < cost * 0.5:
             quantity = (agent.cash * 0.4) / (price + 1e-9)
         if abs(quantity) < 0.01:
@@ -236,7 +359,6 @@ class Simulation:
             agent.unlock_collateral(collateral)
             return
 
-        # Find a willing counterparty with sufficient capital
         candidates = [
             a for a in self.agents
             if a.agent_id != agent.agent_id and a.cash > principal * 0.5
@@ -246,10 +368,7 @@ class Simulation:
             agent.receive_payment(principal - collateral)
             return
 
-        # Pick counterparty probabilistically by preference alignment
-        weights = np.array([
-            a.preference_vector.get("wealth", 0.2) for a in candidates
-        ])
+        weights = np.array([a.preference_vector.get("wealth", 0.2) for a in candidates])
         weights = weights / weights.sum()
         counterparty = candidates[int(self.rng.choice(len(candidates), p=weights))]
 
@@ -265,7 +384,7 @@ class Simulation:
 
         duration = int(self.rng.integers(
             self.cfg.venture_duration_range[0],
-            self.cfg.venture_duration_range[1] + 1
+            self.cfg.venture_duration_range[1] + 1,
         ))
         v = Venture(
             venture_id=self._venture_counter,
@@ -297,12 +416,9 @@ class Simulation:
                 continue
             if v.end_tick > tick:
                 continue
-
             actual_quality = self.world.venture_quality_at(v.asset_idx)
             payouts = v.resolve(actual_quality, self.cfg.venture_surplus_multiplier, tick)
-
             self.metrics.record_venture(succeeded=v.status == VentureStatus.SUCCEEDED)
-
             for aid, payout in payouts.items():
                 ag = agent_map.get(aid)
                 if ag is None:
@@ -315,26 +431,21 @@ class Simulation:
     # ------------------------------------------------------------------
 
     def _select_compression_targets(self) -> None:
-        """Target the top-POLI agents for epistemic degradation."""
-        poli_scores = [
-            (ag.agent_id, ag.poli_score(self.cfg.poli_influence_window))
-            for ag in self.agents
-        ]
-        poli_scores.sort(key=lambda x: x[1], reverse=True)
+        prices_v = self.xp.asarray(self.order_book.prices, dtype=self.xp.float64)
+        poli_np = _to_numpy(self.vstate.poli_scores(prices_v, self.cfg.poli_influence_window))
+        order = np.argsort(poli_np)[::-1]
         self._compression_targets = [
-            aid for aid, _ in poli_scores[:self.cfg.compression_test_agents]
+            self.agents[i].agent_id for i in order[:self.cfg.compression_test_agents]
         ]
-        logger.info(
-            "Compression test started at tick %d, targets: %s",
-            self.tick, self._compression_targets,
+        print(
+            f"\n  {_R}{_B}[compression]{_RS} EH injection begins at tick {self.tick} "
+            f"→ targets: {self._compression_targets}",
+            flush=True,
         )
 
     def _inject_bad_evidence(self, tick: int) -> None:
-        """Feed targeted misinformation to compression-test agents."""
-        from .evidence import Evidence, EvidenceType, EvidenceStatus
         from .agent import _next_ev_id
         agent_map = {ag.agent_id: ag for ag in self.agents}
-
         noise = self.cfg.compression_test_noise
         for aid in self._compression_targets:
             ag = agent_map.get(aid)
@@ -342,11 +453,9 @@ class Simulation:
                 continue
             asset_idx = int(self.rng.integers(0, self.cfg.n_assets))
             true_val = self.world.fundamentals[asset_idx]
-            # Deliberately wrong prediction: flip direction with large error
             fake_val = true_val * (1.0 + noise * self.rng.choice([-1.0, 1.0]))
             horizon = tick + int(self.rng.integers(3, 8))
             key = f"asset_{asset_idx}_price_tick_{horizon}"
-
             ev = Evidence(
                 ev_id=_next_ev_id(),
                 source="oracle_fake",
@@ -355,16 +464,12 @@ class Simulation:
                 target_asset=asset_idx,
                 target_tick=horizon,
                 predicted_value=fake_val,
-                confidence=0.85,  # injected with false high confidence
+                confidence=0.85,
                 timestamp=tick,
             )
             ag.evidence_ledger.append(ev)
             ag.belief_graph.add_or_update(
-                key=key,
-                value=fake_val,
-                strength=1.0,
-                confidence=0.85,
-                tick=tick,
+                key=key, value=fake_val, strength=1.0, confidence=0.85, tick=tick,
             )
 
     # ------------------------------------------------------------------
@@ -372,15 +477,8 @@ class Simulation:
     # ------------------------------------------------------------------
 
     def _update_deception_metrics(
-        self,
-        messages: List[Message],
-        agent_map: Dict[str, Agent],
-        tick: int,
+        self, messages: List[Message], agent_map: Dict[str, Agent], tick: int
     ) -> None:
-        """
-        For TELL messages whose proposition key resolves this tick,
-        check if the sender's claimed value was wrong.
-        """
         for msg in messages:
             if msg.msg_type != MessageType.TELL:
                 continue
@@ -394,8 +492,7 @@ class Simulation:
                 continue
             actual = self.world.fundamentals[asset_idx]
             error_frac = abs(msg.predicted_value - actual) / (abs(actual) + 1e-9)
-            was_refuted = error_frac > 0.10
-            self.metrics.record_tell(was_refuted=was_refuted)
+            self.metrics.record_tell(was_refuted=error_frac > 0.10)
 
     # ------------------------------------------------------------------
     # Summary helpers
@@ -403,9 +500,30 @@ class Simulation:
 
     def compression_test_summary(self) -> Dict:
         return self.metrics.compression_test_result(
-            self._compression_targets,
-            self.cfg.compression_test_start,
+            self._compression_targets, self.cfg.compression_test_start,
         )
 
     def poli_eh_correlation(self) -> float:
         return self.metrics.poli_eh_correlation()
+
+
+# ------------------------------------------------------------------
+# Header printer
+# ------------------------------------------------------------------
+
+def _print_run_header(cfg: SimConfig, device: str) -> None:
+    gpu_tag = f"{_G}GPU:{device}{_RS}" if device != "cpu" else f"{_Y}CPU{_RS}"
+    print(f"""
+{_B}{'='*70}{_RS}
+  {_B}InsideTraderSim — HorizonSim v1{_RS}   [{gpu_tag}]
+{'='*70}
+  Agents       : {cfg.n_agents}
+  Ticks        : {cfg.n_ticks}
+  Assets       : {cfg.n_assets}  |  Ventures : {cfg.n_ventures}
+  Seed         : {cfg.seed}
+  Status every : {cfg.status_interval} ticks
+  Plots every  : {cfg.plot_interval} ticks  → {cfg.plot_dir}/
+  Compression  : starts tick {cfg.compression_test_start} ({cfg.compression_test_agents} agents)
+{_B}{'='*70}{_RS}
+  {'tick':>9}  │  wealth_total  │  gini  │  trust  │  decept  │  ventures  │  ...
+{'─'*70}""", flush=True)

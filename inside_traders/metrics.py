@@ -64,12 +64,16 @@ class MetricsCollector:
         market_prices: np.ndarray,
         active_ventures: List["Venture"],
         n_ticks_window: int,
+        # Optional pre-computed GPU arrays (passed from Simulation._take_snapshot)
+        _wealth_override: Optional[np.ndarray] = None,
+        _poli_override: Optional[np.ndarray] = None,
+        _eh_override: Optional[np.ndarray] = None,
     ) -> TickSnapshot:
         n = len(agents)
         agent_ids = [a.agent_id for a in agents]
-        wealth = np.array([a.net_worth(market_prices) for a in agents])
-        poli = np.array([a.poli_score(n_ticks_window) for a in agents])
-        eh = np.array([a.epistemic_health(agents) for a in agents])
+        wealth = _wealth_override if _wealth_override is not None else np.array([a.net_worth(market_prices) for a in agents])
+        poli   = _poli_override   if _poli_override   is not None else np.array([a.poli_score(n_ticks_window) for a in agents])
+        eh     = _eh_override     if _eh_override     is not None else np.array([a.epistemic_health(agents) for a in agents])
         poli_eh = poli * eh
 
         # Trust: average credibility each agent assigns to others

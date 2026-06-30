@@ -28,25 +28,20 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--assets", type=int, default=5)
     p.add_argument("--ventures", type=int, default=4)
     p.add_argument("--log-interval", type=int, default=10)
+    p.add_argument("--status-interval", type=int, default=10,
+                   help="Print a live status line every N ticks (default 10)")
+    p.add_argument("--plot-interval", type=int, default=50,
+                   help="Save a mid-run dashboard PNG every N ticks (default 50)")
+    p.add_argument("--plot-dir", type=str, default="plots",
+                   help="Directory to write plot files into")
+    p.add_argument("--device", type=str, default="cpu", choices=["cpu", "cuda"],
+                   help="Compute device: 'cpu' (default) or 'cuda' for A100/GPU")
     p.add_argument("--verbose", action="store_true")
     p.add_argument("--no-plots", action="store_true")
     p.add_argument("--gini-target", type=float, default=None,
                    help="If set, print PASS/FAIL if final Gini exceeds this value")
     return p.parse_args()
 
-
-def print_header(cfg: SimConfig) -> None:
-    print("=" * 60)
-    print("  InsideTraderSim — HorizonSim v1")
-    print("=" * 60)
-    print(f"  Agents       : {cfg.n_agents}")
-    print(f"  Ticks        : {cfg.n_ticks}")
-    print(f"  Assets       : {cfg.n_assets}")
-    print(f"  Ventures     : {cfg.n_ventures}")
-    print(f"  Seed         : {cfg.seed}")
-    print(f"  Compression  : starts tick {cfg.compression_test_start} "
-          f"({cfg.compression_test_agents} agents targeted)")
-    print("=" * 60)
 
 
 def print_summary(sim: Simulation) -> None:
@@ -107,17 +102,17 @@ def main() -> None:
         n_ticks=args.ticks,
         seed=args.seed,
         log_interval=args.log_interval,
+        status_interval=args.status_interval,
+        plot_interval=args.plot_interval,
+        plot_dir=args.plot_dir,
+        device=args.device,
         verbose=args.verbose,
     )
-
-    print_header(cfg)
 
     t0 = time.perf_counter()
     sim = Simulation(cfg)
     sim.run()
     elapsed = time.perf_counter() - t0
-    print(f"\n  Ran {cfg.n_ticks} ticks in {elapsed:.2f}s "
-          f"({cfg.n_ticks/elapsed:.0f} ticks/sec)")
 
     print_summary(sim)
 

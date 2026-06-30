@@ -62,9 +62,15 @@ class SimConfig:
     compression_test_agents: int = 3      # number of top-POLI agents to degrade
     compression_test_noise: float = 0.5   # magnitude of injected misinformation
 
-    # ---- Logging ----
+    # ---- Logging & output ----
     log_interval: int = 10               # ticks between metric snapshots
+    status_interval: int = 10            # ticks between live console status lines
+    plot_interval: int = 50              # ticks between mid-run dashboard saves
+    plot_dir: str = "plots"              # directory for mid-run and final plots
     verbose: bool = False
+
+    # ---- Compute device ----
+    device: str = "cpu"                  # "cpu" or "cuda" (A100 / any CUDA GPU)
 
     # ---- Preference vector weights (names only; values randomised per agent) ----
     preference_dimensions: tuple = ("wealth", "influence", "security", "knowledge", "autonomy")

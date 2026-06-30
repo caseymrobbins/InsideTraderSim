@@ -5,6 +5,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 from .config import SimConfig
+from .accelerator import VectorizedWorld, _to_numpy
 
 
 @dataclass
@@ -29,14 +30,28 @@ class World:
     venture_qualities: shape (n_ventures,) — latent quality of each venture type
     """
 
-    def __init__(self, cfg: SimConfig, rng: np.random.Generator) -> None:
+    def __init__(self, cfg: SimConfig, rng: np.random.Generator, xp=None) -> None:
         self.cfg = cfg
         self.rng = rng
         self.tick: int = 0
+        self._xp = xp if xp is not None else np
 
-        # Initialise fundamentals
-        self.fundamentals: np.ndarray = rng.uniform(80.0, 120.0, cfg.n_assets)
-        self.venture_qualities: np.ndarray = rng.uniform(0.3, 0.9, cfg.n_ventures)
+        # Initialise fundamentals on CPU first, then hand off to VectorizedWorld
+        init_f = rng.uniform(80.0, 120.0, cfg.n_assets)
+        init_q = rng.uniform(0.3, 0.9, cfg.n_ventures)
+
+        self._gpu_world = VectorizedWorld(
+            n_assets=cfg.n_assets,
+            n_ventures=cfg.n_ventures,
+            initial_fundamentals=init_f,
+            initial_qualities=init_q,
+            xp=self._xp,
+            rng_seed=cfg.seed,
+        )
+
+        # CPU-side copies (kept in sync after each step)
+        self.fundamentals: np.ndarray = init_f.copy()
+        self.venture_qualities: np.ndarray = init_q.copy()
 
         # History for metric evaluation
         self.fundamental_history: List[np.ndarray] = [self.fundamentals.copy()]
@@ -47,27 +62,18 @@ class World:
     # ------------------------------------------------------------------
 
     def step(self) -> None:
-        """Advance hidden state by one tick."""
+        """Advance hidden state by one tick (runs on device via VectorizedWorld)."""
         self.tick += 1
         cfg = self.cfg
 
-        # GBM-like update
-        drift = cfg.asset_drift * self.fundamentals
-        noise = cfg.asset_volatility * self.fundamentals * self.rng.standard_normal(cfg.n_assets)
-        self.fundamentals += drift + noise
-
-        # Regime jumps
-        jump_mask = self.rng.random(cfg.n_assets) < cfg.jump_probability
-        if jump_mask.any():
-            jumps = cfg.jump_magnitude * self.fundamentals * self.rng.standard_normal(cfg.n_assets)
-            self.fundamentals[jump_mask] += jumps[jump_mask]
-
-        self.fundamentals = np.maximum(self.fundamentals, 1.0)  # floor at 1
-
-        # Venture quality drift
-        v_noise = 0.02 * self.rng.standard_normal(cfg.n_ventures)
-        self.venture_qualities = np.clip(self.venture_qualities + v_noise, 0.05, 0.95)
-
+        # GPU/CPU update — returns a CPU numpy array
+        self.fundamentals = self._gpu_world.step(
+            drift=cfg.asset_drift,
+            volatility=cfg.asset_volatility,
+            jump_prob=cfg.jump_probability,
+            jump_mag=cfg.jump_magnitude,
+        )
+        self.venture_qualities = _to_numpy(self._gpu_world.venture_qualities)
         self.fundamental_history.append(self.fundamentals.copy())
 
     # ------------------------------------------------------------------

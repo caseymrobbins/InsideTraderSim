@@ -1,5 +1,6 @@
 """Visualization hooks for InsideTraderSim metrics."""
 from __future__ import annotations
+import os
 from typing import TYPE_CHECKING, List, Optional
 import numpy as np
 
@@ -246,9 +247,145 @@ def plot_venture_vs_trading(metrics: "MetricsCollector") -> None:
     print("[viz] Saved: ventures.png")
 
 
+def plot_midrun_dashboard(sim: "Simulation", tick: int, plot_dir: str = "plots") -> str:
+    """
+    6-panel mid-run dashboard saved every plot_interval ticks.
+    Returns the saved file path.
+
+    Panels:
+      [0,0] Wealth distribution (histogram)       [0,1] Gini over time
+      [1,0] Asset prices so far                   [1,1] POLI×EH scatter (current tick)
+      [2,0] Trust + deception over time           [2,1] Venture success + active count
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg")   # non-interactive backend, safe in all environments
+        import matplotlib.pyplot as plt
+        import matplotlib.gridspec as gridspec
+    except ImportError:
+        return "[viz] matplotlib not installed; skipping mid-run dashboard."
+
+    m = sim.metrics
+    snaps = m.snapshots
+    if not snaps:
+        return ""
+
+    fig = plt.figure(figsize=(16, 11))
+    fig.suptitle(
+        f"InsideTraderSim — HorizonSim v1 │ Tick {tick}/{sim.cfg.n_ticks}  "
+        f"(device={sim.device})",
+        fontsize=13, fontweight="bold",
+    )
+    gs = gridspec.GridSpec(3, 2, figure=fig, hspace=0.45, wspace=0.32)
+
+    ticks_x = [s.tick for s in snaps]
+    final = snaps[-1]
+
+    # ── [0,0] Wealth histogram ──────────────────────────────────────
+    ax = fig.add_subplot(gs[0, 0])
+    ax.hist(final.wealth, bins=max(8, sim.cfg.n_agents // 4),
+            color="steelblue", edgecolor="white", alpha=0.85)
+    ax.axvline(float(np.mean(final.wealth)), color="red", linestyle="--",
+               linewidth=1.2, label=f"mean={np.mean(final.wealth):.0f}")
+    ax.set_title(f"Wealth Distribution  (Gini={final.gini:.3f})", fontsize=10)
+    ax.set_xlabel("Wealth")
+    ax.set_ylabel("Agents")
+    ax.legend(fontsize=8)
+    ax.grid(alpha=0.25)
+
+    # ── [0,1] Gini over time ─────────────────────────────────────────
+    ax = fig.add_subplot(gs[0, 1])
+    ax.plot(ticks_x, [s.gini for s in snaps], color="crimson", linewidth=1.5)
+    if sim.cfg.compression_test_start <= tick:
+        ax.axvline(sim.cfg.compression_test_start, color="black",
+                   linestyle=":", linewidth=1, alpha=0.6, label="compression start")
+        ax.legend(fontsize=8)
+    ax.set_title("Gini Coefficient Over Time", fontsize=10)
+    ax.set_xlabel("Tick")
+    ax.set_ylabel("Gini")
+    ax.set_ylim(0, 1)
+    ax.grid(alpha=0.25)
+
+    # ── [1,0] Asset prices ───────────────────────────────────────────
+    ax = fig.add_subplot(gs[1, 0])
+    n_assets = len(snaps[0].asset_prices)
+    prices_mat = np.array([s.asset_prices for s in snaps])
+    colors_p = plt.cm.tab10(np.linspace(0, 1, n_assets))
+    for i in range(n_assets):
+        ax.plot(ticks_x, prices_mat[:, i], color=colors_p[i],
+                alpha=0.85, linewidth=1.2, label=f"A{i}")
+    ax.set_title("Asset Prices", fontsize=10)
+    ax.set_xlabel("Tick")
+    ax.set_ylabel("Price")
+    ax.legend(ncol=3, fontsize=7, loc="upper left")
+    ax.grid(alpha=0.25)
+
+    # ── [1,1] POLI vs EH scatter ─────────────────────────────────────
+    ax = fig.add_subplot(gs[1, 1])
+    compressed_ids = set(sim._compression_targets)
+    colors_sc = ["crimson" if aid in compressed_ids else "steelblue"
+                 for aid in final.agent_ids]
+    ax.scatter(final.poli, final.eh, c=colors_sc, alpha=0.7,
+               edgecolors="k", linewidths=0.4, s=55)
+    if len(final.poli) >= 2:
+        corr = float(np.corrcoef(final.poli, final.eh)[0, 1])
+        ax.annotate(f"r = {corr:.3f}", xy=(0.05, 0.90), xycoords="axes fraction",
+                    fontsize=10, color="navy")
+    if compressed_ids:
+        ax.scatter([], [], c="crimson", label="compressed", s=50, edgecolors="k", linewidths=0.4)
+        ax.legend(fontsize=8)
+    ax.set_title("POLI vs Epistemic Health (EH)", fontsize=10)
+    ax.set_xlabel("POLI score")
+    ax.set_ylabel("EH")
+    ax.grid(alpha=0.25)
+
+    # ── [2,0] Trust + deception ──────────────────────────────────────
+    ax = fig.add_subplot(gs[2, 0])
+    trust_line, = ax.plot(ticks_x, [s.mean_trust for s in snaps],
+                          color="teal", linewidth=1.5, label="mean trust")
+    ax2 = ax.twinx()
+    decept_line, = ax2.plot(ticks_x, [s.deception_rate for s in snaps],
+                             color="firebrick", linewidth=1.2, linestyle="--",
+                             label="deception rate")
+    ax.set_title("Trust & Deception", fontsize=10)
+    ax.set_xlabel("Tick")
+    ax.set_ylabel("Mean trust", color="teal")
+    ax2.set_ylabel("Deception rate", color="firebrick")
+    lines = [trust_line, decept_line]
+    ax.legend(lines, [l.get_label() for l in lines], fontsize=8, loc="lower right")
+    ax.grid(alpha=0.2)
+
+    # ── [2,1] Venture success + active count ────────────────────────
+    ax = fig.add_subplot(gs[2, 1])
+    ax.plot(ticks_x, [s.venture_success_rate for s in snaps],
+            color="seagreen", linewidth=1.5, label="success rate")
+    ax.set_ylim(0, 1)
+    ax2b = ax.twinx()
+    ax2b.fill_between(ticks_x, [s.n_active_ventures for s in snaps],
+                      alpha=0.2, color="navy")
+    ax2b.plot(ticks_x, [s.n_active_ventures for s in snaps],
+              color="navy", linewidth=1.0, label="active ventures")
+    ax.set_title("Ventures", fontsize=10)
+    ax.set_xlabel("Tick")
+    ax.set_ylabel("Success rate", color="seagreen")
+    ax2b.set_ylabel("Active ventures", color="navy")
+    lines2 = [plt.Line2D([0], [0], color="seagreen", lw=1.5),
+              plt.Line2D([0], [0], color="navy", lw=1.5)]
+    ax.legend(lines2, ["success rate", "active ventures"], fontsize=8)
+    ax.grid(alpha=0.2)
+
+    # ── Save ─────────────────────────────────────────────────────────
+    os.makedirs(plot_dir, exist_ok=True)
+    path = os.path.join(plot_dir, f"dashboard_tick_{tick:04d}.png")
+    fig.savefig(path, dpi=110, bbox_inches="tight")
+    plt.close(fig)
+    return path
+
+
 def run_all_plots(sim: "Simulation") -> None:
     """Convenience function: generate all standard plots after a run."""
     m = sim.metrics
+    os.makedirs(sim.cfg.plot_dir, exist_ok=True)
     plot_wealth_distribution(m)
     plot_poli_eh(m)
     plot_trust_evolution(m)
@@ -257,3 +394,5 @@ def run_all_plots(sim: "Simulation") -> None:
     plot_venture_vs_trading(m)
     if sim._compression_targets:
         plot_compression_test(m, sim._compression_targets, sim.cfg.compression_test_start)
+    # Final dashboard
+    plot_midrun_dashboard(sim, sim.tick, sim.cfg.plot_dir)
