@@ -215,5 +215,12 @@ def _compute_hi_sus(agent: "Agent") -> float:
     else:
         betrayal = 0.0
 
-    hi_sus = stability * cred_health * (1.0 - betrayal)
+    # Outgoing reliability: were the values this agent actually sent correct?
+    # A large _comm_bias causes sent predictions to diverge from truth, so
+    # outgoing_accuracy drops — pulling HI_sus down and feeding that cost
+    # back into the UHFS reward signal without naming "deception" explicitly.
+    outgoing_acc = agent.outgoing_accuracy() if hasattr(agent, "outgoing_accuracy") else 0.5
+    outgoing_rel = 0.5 + 0.5 * outgoing_acc  # [0.5, 1.0] — never fully zeroes HI_sus
+
+    hi_sus = stability * cred_health * (1.0 - betrayal) * outgoing_rel
     return float(np.clip(hi_sus, 0.05, 1.0))

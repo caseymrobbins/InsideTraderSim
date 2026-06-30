@@ -81,10 +81,16 @@ class Agent:
         self._msg_counter = 0
         self._current_neighbors: List[str] = []  # set by Simulation each tick
 
-        # --- Deception ---
-        # Ground-truth audit: (tick, receiver_id, proposition_key, true_value, asserted_value).
-        # Never visible to other agents.
-        self.lie_log: List[tuple] = []
+        # --- Adaptive communication bias ---
+        # Starts at 0 (neutral). Updated each tick from reward signal so the
+        # agent can drift toward or away from accurate communication without
+        # knowing that distortion = lying. No strategy is encoded here.
+        self._comm_bias: float = 0.0
+        self._prev_reward_signal: float = 0.0
+        # Outgoing tell tracking: (prop_key, communicated_value, target_tick)
+        self._sent_tells: List[Tuple[str, float, int]] = []
+        self._outgoing_confirmed: int = 0
+        self._outgoing_total: int = 0
 
         # --- Metrics tracking ---
         self.trade_history: List[Fill] = []
@@ -162,42 +168,22 @@ class Agent:
 
         key, value, confidence = best_prop
 
-        # ── Deception ────────────────────────────────────────────────────
-        # Temptation is derived from the reward model's incentive structure —
-        # not a static field — because the cost of getting caught varies by model:
-        #   U     → no trust/credibility term in reward → full temptation
-        #   UF    → floor adds some self-preservation concern → slightly less
-        #   UH    → EH term: lying erodes the agent's own epistemic score → moderate
-        #   UHF   → floor + EH → lower still
-        #   UHFS  → HI_sus explicitly penalises credibility loss and betrayal
-        #           exposure, so lying directly degrades the agent's reward signal
-        p_lie = self._deception_probability()
-        if p_lie > 0.0 and self.rng.random() < p_lie:
-            fake_value = -value  # direction-flip: detectable when price resolves
-            self.lie_log.append((tick, receiver, key, value, fake_value))
-            msg = Message(
-                msg_id=self._msg_counter,
-                sender=self.agent_id,
-                receiver=receiver,
-                msg_type=MessageType.TELL,
-                tick=tick,
-                proposition_key=key,
-                predicted_value=fake_value,
-                confidence=0.95,
-                price=None,
-            )
-            self._msg_counter += 1
-            return msg
-
         utility_share = self._utility_of_sharing(key, confidence)
         utility_offer = self._utility_of_offering(key, confidence)
 
         if utility_offer > utility_share and self.cash > self.cfg.signal_base_cost:
             msg_type = MessageType.OFFER
             price = self.cfg.signal_base_cost * (1.0 + confidence)
+            communicated_value = value  # commercial offers: bias not applied
         else:
             msg_type = MessageType.TELL
             price = None
+            # Apply learned communication bias. The agent doesn't know this
+            # distorts truth — it's just its current communication scale.
+            communicated_value = value * (1.0 + self._comm_bias)
+            target_tick = self._parse_target_tick(key)
+            if target_tick is not None:
+                self._sent_tells.append((key, communicated_value, target_tick))
 
         msg = Message(
             msg_id=self._msg_counter,
@@ -206,7 +192,7 @@ class Agent:
             msg_type=msg_type,
             tick=tick,
             proposition_key=key,
-            predicted_value=value,
+            predicted_value=communicated_value,
             confidence=confidence,
             price=price,
         )
@@ -247,37 +233,6 @@ class Agent:
         )
         self._msg_counter += 1
         return msg
-
-    def _deception_probability(self) -> float:
-        """
-        Compute this agent's per-message probability of lying, derived from
-        the reward model's cost structure rather than a static field.
-
-        U     — no agency term at all: lying is free, full temptation (0.30)
-        UF    — floor adds mild self-preservation instinct (0.22)
-        UH    — EH term: lying erodes the agent's own epistemic health (0.14)
-        UHF   — floor + EH dampening (0.08)
-        UHFS  — HI_sus includes credibility health and betrayal exposure;
-                 being caught directly degrades the reward signal, so temptation
-                 scales with (1 - hi_sus): the more the agent has to lose the
-                 less it lies (floor at 0.02 even for a perfect hi_sus=1.0)
-        """
-        from .reward import RewardModelName
-        name = self.reward_model.name
-        if name == RewardModelName.U:
-            return 0.30
-        if name == RewardModelName.UF:
-            return 0.22
-        if name == RewardModelName.UH:
-            return 0.14
-        if name == RewardModelName.UHF:
-            return 0.08
-        # UHFS: lying degrades HI_sus directly — cost is proportional to how
-        # much the agent currently has to lose in the sustainability term.
-        # Coefficient 0.15 ensures p_lie < UHF (0.08) whenever hi_sus > 0.47,
-        # which holds for any agent that hasn't just been stripped of all trust.
-        hi_sus = self._last_agency.hi_sus if self._last_agency is not None else 0.5
-        return max(0.02, 0.15 * (1.0 - hi_sus))
 
     # ------------------------------------------------------------------
     # Step 3: Receive messages → Communication Evidence
@@ -402,7 +357,32 @@ class Agent:
             self._resolved_ev_total += 1
             if is_correct:
                 self._resolved_ev_correct += 1
+
+        # Resolve outgoing tells: did what I actually send turn out to be right?
+        # This measures the accuracy of communicated values (which may be biased),
+        # not the accuracy of the agent's internal beliefs.
+        remaining = []
+        for tell_key, tell_value, tell_tick in self._sent_tells:
+            if tell_tick > tick:
+                remaining.append((tell_key, tell_value, tell_tick))
+                continue
+            asset_idx = self._parse_asset_idx(tell_key)
+            if asset_idx is None:
+                continue
+            actual = float(world_fundamentals[asset_idx])
+            err = abs(tell_value - actual)
+            self._outgoing_total += 1
+            if err / (abs(actual) + 1e-9) < 0.10:
+                self._outgoing_confirmed += 1
+        self._sent_tells = remaining
+
         self.belief_graph.decay(tick, self.cfg.belief_decay)
+
+    def outgoing_accuracy(self) -> float:
+        """Fraction of sent TELL predictions that turned out to be correct."""
+        if self._outgoing_total == 0:
+            return 0.5  # neutral prior: no history yet
+        return self._outgoing_confirmed / self._outgoing_total
 
     # ------------------------------------------------------------------
     # Step 5: Update Intervention view
@@ -508,8 +488,10 @@ class Agent:
         from .reward import RewardModelName, compute_base_utility
         from .horizon import compute_agency_state
 
-        # Plain U model: no modulation
+        # Plain U model: no agency modulation on trading, but comm bias still adapts
         if self.reward_model.name == RewardModelName.U:
+            utility = compute_base_utility(self, market_prices)
+            self._adapt_comm_bias(utility)
             return {"trade_scale": 1.0, "venture_scale": 1.0, "info_scale": 1.0}
 
         # Compute agency indices
@@ -533,6 +515,7 @@ class Agent:
 
         utility = compute_base_utility(self, market_prices)
         reward = self.reward_model.compute(utility, agency)
+        self._adapt_comm_bias(reward)
 
         if agency.in_danger_zone:
             # ── Danger zone ────────────────────────────────────────────
@@ -561,6 +544,26 @@ class Agent:
                 "reward": reward,
                 "agency": agency,
             }
+
+    def _adapt_comm_bias(self, current_reward: float) -> None:
+        """
+        Update the communication bias from the reward signal.
+
+        If reward went up → reinforce whatever direction bias is currently in.
+        If reward went down → pull bias back toward 0 (more accurate / honest).
+        Near zero → inject tiny random exploration so bias can move off the origin.
+
+        No strategy is encoded: the agent doesn't know _comm_bias affects truth.
+        The reward model determines whether distortion is punished (UHFS) or free (U).
+        """
+        reward_delta = current_reward - self._prev_reward_signal
+        if abs(self._comm_bias) < 1e-4:
+            self._comm_bias += 0.002 * float(self.rng.standard_normal())
+        else:
+            direction = math.copysign(1.0, reward_delta) * math.copysign(1.0, self._comm_bias)
+            self._comm_bias += 0.003 * direction
+            self._comm_bias = float(np.clip(self._comm_bias, -1.0, 1.0))
+        self._prev_reward_signal = current_reward
 
     # ------------------------------------------------------------------
     # Step 7: Execute trade
