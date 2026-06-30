@@ -126,12 +126,35 @@ class Simulation:
         raw = self.rng.pareto(self.cfg.wealth_pareto_alpha, self.cfg.n_agents)
         raw = raw / raw.max()
         wealth = self.cfg.wealth_min + raw * (self.cfg.wealth_max - self.cfg.wealth_min)
+
+        # Resolve reward model once so all agents share the same instance (or mixed)
+        from .reward import REWARD_MODELS, RewardModelName
+        default_rm = REWARD_MODELS[RewardModelName(self.cfg.reward_model)]
+
+        compressed_ids = set(self.cfg.exp_compressed_agent_ids)
+
         for i in range(self.cfg.n_agents):
+            initial_cash = float(wealth[i])
+
+            # Pre-seed compressed agents: high wealth, degraded prediction cards (via cfg clone),
+            # and near-isolated comm graph — creates high-POLI / low-EH archetype from tick 0.
+            if i in compressed_ids and compressed_ids:
+                initial_cash *= self.cfg.exp_compressed_wealth_mul
+                agent_cfg = SimConfig(**{
+                    **self.cfg.__dict__,
+                    "card_noise_low_quality": self.cfg.exp_compressed_card_noise,
+                    "card_noise_high_quality": self.cfg.exp_compressed_card_noise,
+                    "initial_neighbors": self.cfg.exp_compressed_network_degree,
+                })
+            else:
+                agent_cfg = self.cfg
+
             agents.append(Agent(
                 agent_id=f"agent_{i}",
-                cfg=self.cfg,
+                cfg=agent_cfg,
                 rng=np.random.default_rng(self.cfg.seed + i + 1),
-                initial_cash=float(wealth[i]),
+                initial_cash=initial_cash,
+                reward_model=default_rm,
             ))
         return agents
 

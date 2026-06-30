@@ -1,5 +1,6 @@
-"""HorizonSim v1 Agent: full cognitive architecture."""
+"""HorizonSim v1 Agent: full cognitive architecture with reward model integration."""
 from __future__ import annotations
+import math
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 import numpy as np
 
@@ -12,6 +13,8 @@ if TYPE_CHECKING:
     from .world import World, PredictionCard
     from .market import OrderBook, Fill
     from .venture import Venture
+    from .reward import RewardModel
+    from .horizon import AgencyState
 
 
 _EV_COUNTER = 0
@@ -27,17 +30,15 @@ class Agent:
     """
     HorizonSim v1 cognitive agent.
 
-    Internal state:
-      - preference_vector: fixed utility weights
-      - belief_graph: dynamic proposition network
-      - evidence_ledger: immutable append log
-      - epistemic_model: per-source credibility
-      - address_book: known peers (managed by CommunicationGraph)
-      - positions: per-asset holdings
-      - cash: current numeraire balance
+    Reward model integration
+    ------------------------
+    Each agent carries a RewardModel instance (default: RewardU = plain utility).
+    At planning time, compute_reward_modulation() evaluates the current agency
+    state and returns scaling factors that modify trade aggressiveness, venture
+    probability, and information-buying frequency — without hard-coding strategies.
 
-    Strategy is NOT hard-coded. All complex behaviour emerges from
-    utility maximisation over beliefs and preferences.
+    The modulation is always *emergent*: the reward signal shapes the cost/benefit
+    calculation, not the action selection rule.
     """
 
     def __init__(
@@ -46,6 +47,7 @@ class Agent:
         cfg: SimConfig,
         rng: np.random.Generator,
         initial_cash: float,
+        reward_model: Optional["RewardModel"] = None,
     ) -> None:
         self.agent_id = agent_id
         self.cfg = cfg
@@ -53,8 +55,15 @@ class Agent:
 
         # --- Economic state ---
         self.cash: float = initial_cash
+        self._initial_cash: float = initial_cash   # fixed reference for agency/utility
         self.positions: np.ndarray = np.zeros(cfg.n_assets)
-        self.locked_collateral: float = 0.0   # numeraire locked in ventures
+        self.locked_collateral: float = 0.0
+
+        # --- Reward model ---
+        if reward_model is None:
+            from .reward import REWARD_MODELS, RewardModelName
+            reward_model = REWARD_MODELS[RewardModelName(cfg.reward_model)]
+        self.reward_model: "RewardModel" = reward_model
 
         # --- Cognitive architecture ---
         self.preference_vector: Dict[str, float] = self._init_preferences()
@@ -64,8 +73,9 @@ class Agent:
 
         # --- Communication ---
         self._outbox: List[Message] = []
-        self._pending_offers: Dict[int, Message] = {}   # offer_id → offer message
+        self._pending_offers: Dict[int, Message] = {}
         self._msg_counter = 0
+        self._current_neighbors: List[str] = []  # set by Simulation each tick
 
         # --- Metrics tracking ---
         self.trade_history: List[Fill] = []
@@ -73,11 +83,15 @@ class Agent:
         self.wealth_history: List[float] = [initial_cash]
         self.poli_history: List[float] = []
         self.eh_history: List[float] = []
-        self._market_impact_total: float = 0.0   # |$| traded last window
+        self._market_impact_total: float = 0.0
         self._resolved_ev_correct: int = 0
         self._resolved_ev_total: int = 0
 
-        # --- Intervention view (optional extension surface) ---
+        # --- Agency / horizon index tracking ---
+        self.agency_history: List["AgencyState"] = []
+        self._last_agency: Optional["AgencyState"] = None
+
+        # --- Intervention view ---
         self.intervention_log: List[Dict] = []
 
     # ------------------------------------------------------------------
@@ -107,7 +121,6 @@ class Agent:
                 timestamp=tick,
             )
             self.evidence_ledger.append(ev)
-            # Immediately update belief graph from observation
             self.belief_graph.add_or_update(
                 key=key,
                 value=card.predicted_value,
@@ -127,6 +140,7 @@ class Agent:
         neighbors: List[str],
         market_prices: np.ndarray,
     ) -> Optional[Message]:
+        self._current_neighbors = neighbors  # cache for agency computation
         if not neighbors:
             return None
 
@@ -134,15 +148,10 @@ class Agent:
         best_prop = self._best_proposition_to_share(tick)
 
         if best_prop is None:
-            # No useful belief to share — send an ASK instead
             asset_idx = int(self.rng.integers(0, self.cfg.n_assets))
             return self._make_ask(receiver, asset_idx, tick)
 
         key, value, confidence = best_prop
-        # Lying emerges naturally: when utility of misleading > sharing truth
-        # Here agents send the proposition they actually believe (or distort when
-        # it serves them — that distortion is not explicit but can emerge via
-        # belief noise and gain calculations)
         utility_share = self._utility_of_sharing(key, confidence)
         utility_offer = self._utility_of_offering(key, confidence)
 
@@ -170,10 +179,8 @@ class Agent:
         return msg
 
     def _best_proposition_to_share(self, tick: int) -> Optional[Tuple[str, float, float]]:
-        """Find the proposition the agent has highest-confidence belief on."""
         best = None
         for prop in self.belief_graph.all_propositions():
-            # Only future-resolving beliefs are useful to share
             try:
                 res_tick = int(prop.key.split("_tick_")[1])
             except (IndexError, ValueError):
@@ -190,8 +197,7 @@ class Agent:
 
     def _utility_of_offering(self, key: str, confidence: float) -> float:
         w = self.preference_vector
-        return (w["wealth"] * confidence * self.cfg.signal_base_cost
-                + w["influence"] * 0.2)
+        return (w["wealth"] * confidence * self.cfg.signal_base_cost + w["influence"] * 0.2)
 
     def _make_ask(self, receiver: str, asset_idx: int, tick: int) -> Message:
         msg = Message(
@@ -210,31 +216,20 @@ class Agent:
     # ------------------------------------------------------------------
 
     def receive_message(self, msg: Message, tick: int) -> Optional[Message]:
-        """
-        Process an incoming message.
-        Returns a reply message if applicable (ACCEPT/REJECT/TELL for ASK).
-        """
         if msg.msg_type == MessageType.TELL:
             self._ingest_tell(msg, tick)
             return None
-
         if msg.msg_type == MessageType.OFFER:
             return self._evaluate_offer(msg, tick)
-
         if msg.msg_type == MessageType.ACCEPT:
             self._handle_accept(msg, tick)
             return None
-
         if msg.msg_type == MessageType.REJECT:
             return None
-
         if msg.msg_type == MessageType.ASK:
             return self._answer_ask(msg, tick)
-
         if msg.msg_type == MessageType.INTRODUCE:
-            # Expand address book — handled externally by CommunicationGraph
             return None
-
         return None
 
     def _ingest_tell(self, msg: Message, tick: int) -> None:
@@ -242,7 +237,6 @@ class Agent:
             return
         cred = self.epistemic_model.get(msg.sender, "price", default=0.5)
         effective_confidence = (msg.confidence or 0.5) * cred
-
         ev = Evidence(
             ev_id=_next_ev_id(),
             source=msg.sender,
@@ -265,17 +259,14 @@ class Agent:
         )
 
     def _evaluate_offer(self, msg: Message, tick: int) -> Message:
-        """Decide whether to ACCEPT or REJECT an information offer."""
         price = msg.price or self.cfg.signal_base_cost
         cred = self.epistemic_model.get(msg.sender, "price", default=0.5)
         expected_value_of_info = cred * (msg.confidence or 0.5) * price * 2.0
         w = self.preference_vector
-
         willing = (
             self.cash > price * 1.5
             and expected_value_of_info * w["knowledge"] > price * w["wealth"]
         )
-
         reply_type = MessageType.ACCEPT if willing else MessageType.REJECT
         return Message(
             msg_id=self._msg_counter,
@@ -288,16 +279,13 @@ class Agent:
         )
 
     def _handle_accept(self, msg: Message, tick: int) -> None:
-        """Counterparty accepted our offer — reveal the info, receive payment."""
         offer = self._pending_offers.get(msg.offer_id)
         if offer is None:
             return
         price = offer.price or 0.0
         self.cash += price
-        # The actual info transfer happens at the simulation level
 
     def _answer_ask(self, msg: Message, tick: int) -> Optional[Message]:
-        """Reply to an ASK with our best belief, free of charge."""
         if msg.query_key is None:
             return None
         asset_idx = self._parse_asset_idx(msg.query_key)
@@ -324,10 +312,6 @@ class Agent:
     # ------------------------------------------------------------------
 
     def resolve_evidence(self, tick: int, world_fundamentals: "np.ndarray") -> None:
-        """
-        Check pending evidence whose target_tick <= current tick.
-        Update EpistemicModel and BeliefGraph based on outcomes.
-        """
         for ev in self.evidence_ledger:
             if ev.status != EvidenceStatus.PENDING:
                 continue
@@ -336,14 +320,11 @@ class Agent:
             if ev.target_asset is None:
                 ev.status = EvidenceStatus.EXPIRED
                 continue
-
             actual = float(world_fundamentals[ev.target_asset])
             ev.actual_value = actual
             ev.error = abs(ev.predicted_value - actual)
-            # "Correct" if within 10% of actual
             is_correct = ev.error / (abs(actual) + 1e-9) < 0.10
             ev.status = EvidenceStatus.CONFIRMED if is_correct else EvidenceStatus.REFUTED
-
             self.epistemic_model.update(
                 source=ev.source,
                 prop_type="price",
@@ -353,31 +334,26 @@ class Agent:
             self._resolved_ev_total += 1
             if is_correct:
                 self._resolved_ev_correct += 1
-
-        # Decay stale beliefs
         self.belief_graph.decay(tick, self.cfg.belief_decay)
 
     # ------------------------------------------------------------------
-    # Step 5: Update Intervention view (hook for future extensions)
+    # Step 5: Update Intervention view
     # ------------------------------------------------------------------
 
     def update_intervention_view(self, tick: int, market_prices: np.ndarray) -> None:
-        """
-        Record how recent actions affected agent's option space.
-        This is the extension point for Agency Calculus / Horizon Index overlays.
-        """
         portfolio_value = self.net_worth(market_prices)
         self.intervention_log.append({
             "tick": tick,
             "cash": self.cash,
             "portfolio_value": portfolio_value,
             "n_beliefs": len(self.belief_graph.all_propositions()),
+            "agency": self._last_agency,
         })
         if len(self.intervention_log) > 50:
             self.intervention_log.pop(0)
 
     # ------------------------------------------------------------------
-    # Step 6: Plan
+    # Step 6: Plan  (reward-model-modulated)
     # ------------------------------------------------------------------
 
     def plan_actions(
@@ -386,14 +362,16 @@ class Agent:
         market_prices: np.ndarray,
         active_ventures: List["Venture"],
     ) -> List[Dict]:
-        """
-        Return a list of action dicts the agent intends to execute.
-        Actions: {type: "trade"|"venture_propose"|"buy_info", ...}
-        """
         actions = []
         w = self.preference_vector
 
-        # --- Trading decisions ---
+        # ── Compute reward modulation (once per planning cycle) ───────
+        mod = self._compute_reward_modulation(tick, market_prices)
+        trade_scale    = mod["trade_scale"]
+        venture_scale  = mod["venture_scale"]
+        info_scale     = mod["info_scale"]
+
+        # ── Trading decisions ─────────────────────────────────────────
         for asset_idx in range(self.cfg.n_assets):
             belief = self.belief_graph.highest_confidence_price(asset_idx, tick)
             if belief is None:
@@ -402,15 +380,14 @@ class Agent:
 
             current_price = market_prices[asset_idx]
             expected_return = (predicted_price - current_price) / (current_price + 1e-9)
-            # Risk-adjust by confidence
             risk_adj_return = expected_return * confidence
-            utility = risk_adj_return * w["wealth"] - abs(risk_adj_return) * w["security"] * 0.5
+            base_utility = risk_adj_return * w["wealth"] - abs(risk_adj_return) * w["security"] * 0.5
+            modulated_utility = base_utility * trade_scale
 
-            if abs(utility) < 0.005:
+            if abs(modulated_utility) < 0.005:
                 continue
 
-            # Size proportional to confidence and available cash, capped at max_position
-            desired_position = self.cfg.max_position * confidence * np.sign(utility)
+            desired_position = self.cfg.max_position * confidence * np.sign(modulated_utility)
             current = self.positions[asset_idx]
             order_qty = np.clip(desired_position - current, -50.0, 50.0)
             if abs(order_qty) < 0.1:
@@ -418,7 +395,6 @@ class Agent:
             cost = abs(order_qty) * current_price
             if order_qty > 0 and cost > self.cash * 0.4:
                 order_qty = (self.cash * 0.4) / (current_price + 1e-9)
-
             if abs(order_qty) >= 0.1:
                 actions.append({
                     "type": "trade",
@@ -426,9 +402,9 @@ class Agent:
                     "quantity": float(order_qty),
                 })
 
-        # --- Venture proposals ---
-        if (w["wealth"] > 0.3 and self.cash > 20.0
-                and self.rng.random() < 0.03 * w["knowledge"]):
+        # ── Venture proposals ─────────────────────────────────────────
+        venture_prob = 0.03 * w["knowledge"] * venture_scale
+        if w["wealth"] > 0.3 and self.cash > 20.0 and self.rng.random() < venture_prob:
             asset_idx = int(self.rng.integers(0, self.cfg.n_assets))
             principal = min(self.cash * 0.1, 30.0)
             collateral = principal * self.cfg.venture_collateral_fraction
@@ -440,13 +416,83 @@ class Agent:
                 "surplus_share": 0.5 + 0.1 * w["wealth"],
             })
 
-        # --- Buy premium signal ---
-        signal_utility = w["knowledge"] * 2.0 + w["wealth"] * 0.5
+        # ── Buy premium signal ────────────────────────────────────────
+        signal_utility = (w["knowledge"] * 2.0 + w["wealth"] * 0.5) * info_scale
         if (signal_utility > 1.0 and self.cash > self.cfg.signal_base_cost * 2
-                and self.rng.random() < 0.15):
+                and self.rng.random() < min(0.5, 0.15 * info_scale)):
             actions.append({"type": "buy_signal", "premium": True})
 
         return actions
+
+    # ------------------------------------------------------------------
+    # Reward modulation engine
+    # ------------------------------------------------------------------
+
+    def _compute_reward_modulation(
+        self, tick: int, market_prices: np.ndarray
+    ) -> Dict[str, float]:
+        """
+        Evaluate the reward model and return per-action scaling factors:
+          trade_scale   — multiplier on trading aggressiveness
+          venture_scale — multiplier on venture proposal probability
+          info_scale    — multiplier on information purchasing probability
+        """
+        from .reward import RewardModelName, compute_base_utility
+        from .horizon import compute_agency_state
+
+        # Plain U model: no modulation
+        if self.reward_model.name == RewardModelName.U:
+            return {"trade_scale": 1.0, "venture_scale": 1.0, "info_scale": 1.0}
+
+        # Compute agency indices
+        n_agents = self.cfg.n_agents
+        max_degree = max(self.cfg.initial_neighbors * 3, 1)
+        agency = compute_agency_state(
+            agent=self,
+            market_prices=market_prices,
+            n_agents=n_agents,
+            max_degree=max_degree,
+            tick=tick,
+            cfg=self.cfg,
+        )
+        self._last_agency = agency
+
+        # Store periodically to avoid memory blow-up
+        if tick % 10 == 0:
+            self.agency_history.append(agency)
+            if len(self.agency_history) > 100:
+                self.agency_history.pop(0)
+
+        utility = compute_base_utility(self, market_prices)
+        reward = self.reward_model.compute(utility, agency)
+
+        if agency.in_danger_zone:
+            # ── Danger zone ────────────────────────────────────────────
+            # Determine which dimension is weakest → prioritise restoring it
+            ia_vec = agency.ia_vector
+            weakest = int(np.argmin(ia_vec))
+            # [0]=liquidity [1]=epistemic [2]=network [3]=solvency
+            return {
+                "trade_scale": 0.2,           # pull back from speculative trading
+                "venture_scale": 0.05,        # freeze new ventures
+                "info_scale": 3.0 if weakest == 1 else 1.2,  # seek information if EH weak
+                "reward": reward,
+                "agency": agency,
+            }
+        else:
+            # ── Safe zone ─────────────────────────────────────────────
+            # reward is in (-∞, +∞); tanh maps to (-1, 1); +1 centres around 1.0
+            scale = math.tanh(reward * 0.5) + 1.0   # ∈ (0, 2)
+            # For UHFS: sustainability dampens ventures, FHI boosts information
+            hi_sus = agency.hi_sus if hasattr(agency, "hi_sus") else 1.0
+            fhi    = agency.fhi    if hasattr(agency, "fhi")    else 1.0
+            return {
+                "trade_scale": scale,
+                "venture_scale": scale * hi_sus,
+                "info_scale": scale * (1.0 + 0.5 * fhi),
+                "reward": reward,
+                "agency": agency,
+            }
 
     # ------------------------------------------------------------------
     # Step 7: Execute trade
@@ -494,16 +540,11 @@ class Agent:
         return nw
 
     def belief_accuracy(self) -> float:
-        """Fraction of resolved evidence that was correct."""
         if self._resolved_ev_total == 0:
             return 0.5
         return self._resolved_ev_correct / self._resolved_ev_total
 
     def epistemic_health(self, all_agents: List["Agent"]) -> float:
-        """
-        EH = accuracy × uniqueness proxy.
-        Uniqueness: how many correct beliefs this agent has that others don't.
-        """
         accuracy = self.belief_accuracy()
         my_keys = {
             ev.proposition for ev in self.evidence_ledger
@@ -511,7 +552,6 @@ class Agent:
         }
         if not my_keys:
             return accuracy * 0.5
-
         other_correct_keys: set = set()
         for ag in all_agents:
             if ag.agent_id == self.agent_id:
@@ -519,18 +559,24 @@ class Agent:
             for ev in ag.evidence_ledger:
                 if ev.status == EvidenceStatus.CONFIRMED:
                     other_correct_keys.add(ev.proposition)
-
         unique_correct = len(my_keys - other_correct_keys)
         uniqueness = unique_correct / (len(my_keys) + 1e-9)
         return accuracy * (0.7 + 0.3 * uniqueness)
 
     def poli_score(self, n_ticks_window: int) -> float:
-        """
-        POLI = wealth + market influence + network reach.
-        Simplified to wealth-normalised + recent trade volume.
-        """
         recent_wealth = self.wealth_history[-1] if self.wealth_history else self.cash
         return recent_wealth + self._market_impact_total / (n_ticks_window + 1)
+
+    def current_reward_signal(self, market_prices: np.ndarray) -> float:
+        """Expose latest reward value for metric collection."""
+        from .reward import RewardModelName, compute_base_utility
+        from .horizon import compute_agency_state
+        if self.reward_model.name == RewardModelName.U:
+            return compute_base_utility(self, market_prices)
+        if self._last_agency is not None:
+            u = compute_base_utility(self, market_prices)
+            return self.reward_model.compute(u, self._last_agency)
+        return 0.0
 
     # ------------------------------------------------------------------
     # Helpers

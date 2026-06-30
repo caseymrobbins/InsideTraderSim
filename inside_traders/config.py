@@ -72,5 +72,18 @@ class SimConfig:
     # ---- Compute device ----
     device: str = "cpu"                  # "cpu" or "cuda" (A100 / any CUDA GPU)
 
+    # ---- Reward model ----
+    reward_model: str = "U"              # one of U / UF / UH / UHF / UHFS
+    agency_floor: float = 0.10          # θ — danger-zone threshold on min(I_a)
+
+    # ---- Experiment / compression seeding ----
+    # These control the *initial* compression test (seed specific agents with
+    # high POLI but degraded EH from tick 0).  Different from the mid-run
+    # injection controlled by compression_test_start above.
+    exp_compressed_agent_ids: tuple = ()        # e.g. (0, 1, 2); empty = use runtime selection
+    exp_compressed_wealth_mul: float = 3.0      # wealth multiplier for pre-seeded agents
+    exp_compressed_card_noise: float = 0.45     # high noise on prediction cards (degrades EH)
+    exp_compressed_network_degree: int = 1      # near-isolation in comm graph
+
     # ---- Preference vector weights (names only; values randomised per agent) ----
     preference_dimensions: tuple = ("wealth", "influence", "security", "knowledge", "autonomy")
