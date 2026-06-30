@@ -87,9 +87,9 @@ class Agent:
         #   alignment:   0=against(position opposes belief, incentive to distort)
         #                1=neutral(no significant position)
         #                2=with(position aligns with belief)
-        # Actions: 0=TRUTHFUL  1=AMPLIFY  2=INVERT  3=SILENT
+        # Actions: 0=TRUTHFUL  1=AMPLIFY  2=INVERT  3=SILENT  4=OFFER(sell the info)
         # Agents do not know what any action means — they discover it through reward.
-        self._comm_q: np.ndarray = np.zeros((3, 3, 4))
+        self._comm_q: np.ndarray = np.zeros((3, 3, 5))
         self._comm_epsilon: float = 0.5        # exploration rate, decays each tick
         self._prev_reward_signal: float = 0.0
         self._last_comm_state: Optional[Tuple[int, int]] = None
@@ -176,12 +176,37 @@ class Agent:
         key, value, confidence = best_prop
         asset_idx = self._parse_asset_idx(key)
         target_tick = self._parse_target_tick(key)
+        current_price = market_prices[asset_idx] if asset_idx is not None else value
+        expected_delta = value - current_price
 
-        utility_share = self._utility_of_sharing(key, confidence)
-        utility_offer = self._utility_of_offering(key, confidence)
+        # ── Encode state ─────────────────────────────────────────────────
+        conf_bucket = 0 if confidence < 0.3 else (2 if confidence >= 0.7 else 1)
+        pos = float(self.positions[asset_idx]) if asset_idx is not None else 0.0
+        if abs(pos) < 1.0 or abs(expected_delta) < 1e-6:
+            align_bucket = 1  # neutral: no meaningful position
+        elif (pos > 0 and expected_delta > 0) or (pos < 0 and expected_delta < 0):
+            align_bucket = 2  # position agrees with belief
+        else:
+            align_bucket = 0  # position opposes belief (incentive to distort)
 
-        if utility_offer > utility_share and self.cash > self.cfg.signal_base_cost:
-            # Commercial offer: true value only — buyers verify on delivery
+        state = (conf_bucket, align_bucket)
+        self._last_comm_state = state
+
+        # ── Epsilon-greedy action selection ───────────────────────────────
+        # 0=TRUTHFUL  1=AMPLIFY  2=INVERT  3=SILENT  4=OFFER
+        # No action has a label — the agent discovers what each one does.
+        if self.rng.random() < self._comm_epsilon:
+            action = int(self.rng.integers(0, 5))
+        else:
+            action = int(np.argmax(self._comm_q[state[0], state[1]]))
+        self._last_comm_action = action
+
+        # ── Execute action ────────────────────────────────────────────────
+        if action == 3:  # SILENT: gather rather than broadcast
+            return self._make_ask(receiver, int(self.rng.integers(0, self.cfg.n_assets)), tick)
+
+        if action == 4:  # OFFER: sell the info commercially
+            price = self.cfg.signal_base_cost * (1.0 + confidence)
             msg = Message(
                 msg_id=self._msg_counter,
                 sender=self.agent_id,
@@ -191,45 +216,13 @@ class Agent:
                 proposition_key=key,
                 predicted_value=value,
                 confidence=confidence,
-                price=self.cfg.signal_base_cost * (1.0 + confidence),
+                price=price,
             )
             self._msg_counter += 1
             self._pending_offers[msg.msg_id] = msg
             return msg
 
-        # ── Free TELL: agent selects a communication action via Q-table ──
-        # The agent has no label for what each action does. It explores all
-        # four options and receives reward signal feedback each tick to
-        # discover which action is worth taking in which situation.
-        current_price = market_prices[asset_idx] if asset_idx is not None else value
-        expected_delta = value - current_price
-
-        # Encode state
-        conf_bucket = 0 if confidence < 0.3 else (2 if confidence >= 0.7 else 1)
-        pos = float(self.positions[asset_idx]) if asset_idx is not None else 0.0
-        if abs(pos) < 1.0 or abs(expected_delta) < 1e-6:
-            align_bucket = 1  # neutral
-        elif (pos > 0 and expected_delta > 0) or (pos < 0 and expected_delta < 0):
-            align_bucket = 2  # position agrees with belief
-        else:
-            align_bucket = 0  # position opposes belief
-
-        state = (conf_bucket, align_bucket)
-        self._last_comm_state = state
-
-        # Epsilon-greedy action selection
-        if self.rng.random() < self._comm_epsilon:
-            action = int(self.rng.integers(0, 4))
-        else:
-            action = int(np.argmax(self._comm_q[state[0], state[1]]))
-        self._last_comm_action = action
-
-        # Action 3 = SILENT: skip the TELL, send an ASK instead
-        if action == 3:
-            return self._make_ask(receiver, int(self.rng.integers(0, self.cfg.n_assets)), tick)
-
-        # Map action to communicated value
-        # 0=TRUTHFUL  1=AMPLIFY(exaggerate direction)  2=INVERT(opposite direction)
+        # TELL actions: 0=TRUTHFUL  1=AMPLIFY  2=INVERT
         if action == 0:
             communicated_value = value
         elif action == 1:
@@ -266,14 +259,6 @@ class Agent:
             if best is None or prop.confidence > best[2]:
                 best = (prop.key, prop.value, prop.confidence)
         return best
-
-    def _utility_of_sharing(self, key: str, confidence: float) -> float:
-        w = self.preference_vector
-        return (w["influence"] * confidence + w["knowledge"] * 0.3) * 0.5
-
-    def _utility_of_offering(self, key: str, confidence: float) -> float:
-        w = self.preference_vector
-        return (w["wealth"] * confidence * self.cfg.signal_base_cost + w["influence"] * 0.2)
 
     def _make_ask(self, receiver: str, asset_idx: int, tick: int) -> Message:
         msg = Message(
