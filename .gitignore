@@ -1,3 +1,4 @@
+**/__pycache__/
 __pycache__/
 *.py[cod]
 *.pyo
@@ -14,3 +15,4 @@ build/
 .venv
 venv/
 sweep_results.csv
+experiment_results_smoke/
