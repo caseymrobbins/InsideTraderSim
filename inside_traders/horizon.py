@@ -4,11 +4,12 @@ HorizonSim Agency Indices
 
 Computes the four quantities used by the modulated reward equations:
 
-  I_a   — Agency vector: 4-dimensional, each ∈ (0, 1]
+  I_a   — Agency vector: 5-dimensional, each ∈ (0, 1]
             [0] liquidity   cash / initial_cash
             [1] epistemic   EH score (belief accuracy × uniqueness)
             [2] network     comm-graph degree / n_agents
             [3] solvency    net_worth / initial_wealth
+            [4] options     fraction of strategy-graph cells still viable (weight ≥ 0)
 
   HI_Ia — Horizon Index of agency: geometric mean of I_a
             HI_Ia = (∏ I_a_i)^(1/n) = exp(mean(log(I_a)))
@@ -42,11 +43,12 @@ _EPS: float = 1e-9             # numerical floor for logs
 @dataclass(frozen=True)
 class AgencyState:
     """Snapshot of an agent's agency indices at one tick."""
-    # Raw 4-vector
+    # Raw 5-vector
     ia_liquidity: float    # cash / initial_cash
     ia_epistemic: float    # epistemic health score
     ia_network: float      # degree / n_agents
     ia_solvency: float     # net_worth / initial_wealth
+    ia_options: float      # fraction of strategy-graph cells still viable (weight ≥ 0)
 
     # Derived indices
     min_ia: float          # bottleneck dimension (triggers danger zone)
@@ -61,7 +63,7 @@ class AgencyState:
     def ia_vector(self) -> np.ndarray:
         return np.array([
             self.ia_liquidity, self.ia_epistemic,
-            self.ia_network, self.ia_solvency,
+            self.ia_network, self.ia_solvency, self.ia_options,
         ])
 
 
@@ -82,9 +84,10 @@ def compute_agency_state(
     ia_epistemic = _compute_epistemic(agent)
     ia_network   = _compute_network(agent, n_agents, max_degree)
     ia_solvency  = _compute_solvency(agent, market_prices)
+    ia_options   = _compute_options(agent)
 
     # ── Derived ───────────────────────────────────────────────────────
-    ia_vec = np.array([ia_liquidity, ia_epistemic, ia_network, ia_solvency])
+    ia_vec = np.array([ia_liquidity, ia_epistemic, ia_network, ia_solvency, ia_options])
     min_ia = float(ia_vec.min())
     hi_ia  = float(np.exp(np.mean(np.log(ia_vec + _EPS))))  # geometric mean
 
@@ -96,6 +99,7 @@ def compute_agency_state(
         ia_epistemic=ia_epistemic,
         ia_network=ia_network,
         ia_solvency=ia_solvency,
+        ia_options=ia_options,
         min_ia=min_ia,
         hi_ia=hi_ia,
         fhi=fhi,
@@ -135,6 +139,55 @@ def _compute_solvency(agent: "Agent", market_prices: np.ndarray) -> float:
     initial = getattr(agent, "_initial_cash", max(agent.cash, 1.0))
     ratio = nw / max(initial, _EPS)
     return float(np.clip(ratio, _EPS, 1.0))
+
+
+_OPTIONS_TEMP: float = 1.0   # softness of the viability curve around q=0
+_OPTIONS_UNVISITED_PRIOR: float = 0.5  # an untried cell is "unknown", not "open"
+
+
+def _compute_options(agent: "Agent") -> float:
+    """
+    Viable mass of the agent's strategy graph (Q-table): how much of its
+    own action space it can still exercise without (subjectively) harming
+    itself, weighted by magnitude and only credited where actually tried.
+
+    Two failure modes a naive `fraction of cells >= 0` has, both fixed here:
+
+      1. Sign vs. magnitude: a cell at -0.01 and one at -50 are not equally
+         "destroyed", and a cell sitting at exactly 0 only looks "open"
+         because it has never been tested. We map each visited cell's
+         weight through a sigmoid (smooth, magnitude-sensitive) instead of
+         thresholding its sign, and give unvisited cells a neutral 0.5
+         prior — "unknown", not "available".
+
+      2. Reward-shaping toward paralysis: if untried cells counted as fully
+         open (1.0), the cheapest way to keep this score high would be to
+         never explore. Capping unvisited cells at the neutral prior (which
+         is *lower* than a confidently-good visited cell, 0.5 < sigmoid(+q))
+         means an agent has to actually exercise options to be credited for
+         having them — sitting still cannot maximize this term.
+
+    This stays purely a function of the agent's own subjective experience
+    (its own rewards), not of hidden ground truth — an agent has no
+    privileged access to whether it was deceived, only to what hurt it.
+    Whether the resulting compression actually localizes to deception
+    (rather than ordinary exploration noise) is a separate, falsifiable
+    question — see scripts/verify_options_localizes_to_deception.py.
+    """
+    q = getattr(agent, "_comm_q", None)
+    visits = getattr(agent, "_comm_q_visits", None)
+    if q is None or q.size == 0:
+        return 1.0
+    if visits is None:
+        # No visit tracking available: fall back to a magnitude-aware
+        # estimate treating every cell as visited (conservative under-prior).
+        viability = 1.0 / (1.0 + np.exp(-q / _OPTIONS_TEMP))
+        return float(np.clip(viability.mean(), _EPS, 1.0))
+
+    visited = visits > 0
+    viability = np.full(q.shape, _OPTIONS_UNVISITED_PRIOR, dtype=float)
+    viability[visited] = 1.0 / (1.0 + np.exp(-q[visited] / _OPTIONS_TEMP))
+    return float(np.clip(viability.mean(), _EPS, 1.0))
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -215,5 +268,12 @@ def _compute_hi_sus(agent: "Agent") -> float:
     else:
         betrayal = 0.0
 
-    hi_sus = stability * cred_health * (1.0 - betrayal)
+    # Outgoing reliability: were the values this agent actually sent correct?
+    # A large _comm_bias causes sent predictions to diverge from truth, so
+    # outgoing_accuracy drops — pulling HI_sus down and feeding that cost
+    # back into the UHFS reward signal without naming "deception" explicitly.
+    outgoing_acc = agent.outgoing_accuracy() if hasattr(agent, "outgoing_accuracy") else 0.5
+    outgoing_rel = 0.5 + 0.5 * outgoing_acc  # [0.5, 1.0] — never fully zeroes HI_sus
+
+    hi_sus = stability * cred_health * (1.0 - betrayal) * outgoing_rel
     return float(np.clip(hi_sus, 0.05, 1.0))

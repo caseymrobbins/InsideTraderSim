@@ -81,12 +81,24 @@ class Agent:
         self._msg_counter = 0
         self._current_neighbors: List[str] = []  # set by Simulation each tick
 
-        # --- Deception ---
-        # P(emit a believed-wrong claim) when a strong incentive exists; 0 = honest.
-        self.lie_propensity: float = 0.0
-        # Ground-truth audit: (tick, receiver_id, proposition_key, true_value, asserted_value).
-        # Never visible to other agents.
-        self.lie_log: List[tuple] = []
+        # --- Communication Q-table (learned, no strategy pre-coded) ---
+        # State: (belief_confidence_bucket ∈ {0,1,2}) × (position_alignment ∈ {0,1,2})
+        #   confidence:  0=low(<0.3)  1=mid  2=high(≥0.7)
+        #   alignment:   0=against(position opposes belief, incentive to distort)
+        #                1=neutral(no significant position)
+        #                2=with(position aligns with belief)
+        # Actions: 0=TRUTHFUL  1=AMPLIFY  2=INVERT  3=SILENT  4=OFFER(sell the info)
+        # Agents do not know what any action means — they discover it through reward.
+        self._comm_q: np.ndarray = np.zeros((3, 3, 5))
+        self._comm_q_visits: np.ndarray = np.zeros((3, 3, 5), dtype=np.int64)
+        self._comm_epsilon: float = 0.5        # exploration rate, decays each tick
+        self._prev_reward_signal: float = 0.0
+        self._last_comm_state: Optional[Tuple[int, int]] = None
+        self._last_comm_action: Optional[int] = None
+        # Outgoing tell tracking for outgoing_accuracy → HI_sus feedback
+        self._sent_tells: List[Tuple[str, float, int]] = []
+        self._outgoing_confirmed: int = 0
+        self._outgoing_total: int = 0
 
         # --- Metrics tracking ---
         self.trade_history: List[Fill] = []
@@ -163,55 +175,77 @@ class Agent:
             return self._make_ask(receiver, asset_idx, tick)
 
         key, value, confidence = best_prop
+        asset_idx = self._parse_asset_idx(key)
+        target_tick = self._parse_target_tick(key)
+        current_price = market_prices[asset_idx] if asset_idx is not None else value
+        expected_delta = value - current_price
 
-        # ── Deception (opt-in via lie_propensity) ────────────────────────
-        # Incentive proxy: the agent only bothers to deceive when it holds
-        # a high-confidence belief (i.e. it has an informational edge worth
-        # protecting). It then sends the *negated* price prediction with high
-        # confidence so the receiver mis-prices the asset. The lie is catchable:
-        # resolve_evidence() marks the receiver's evidence REFUTED when the
-        # actual price is revealed, dropping the liar's credibility score.
-        if self.lie_propensity > 0.0 and self.rng.random() < self.lie_propensity:
-            fake_value = -value  # direction-flip is the simplest detectable lie
-            self.lie_log.append((tick, receiver, key, value, fake_value))
+        # ── Encode state ─────────────────────────────────────────────────
+        conf_bucket = 0 if confidence < 0.3 else (2 if confidence >= 0.7 else 1)
+        pos = float(self.positions[asset_idx]) if asset_idx is not None else 0.0
+        if abs(pos) < 1.0 or abs(expected_delta) < 1e-6:
+            align_bucket = 1  # neutral: no meaningful position
+        elif (pos > 0 and expected_delta > 0) or (pos < 0 and expected_delta < 0):
+            align_bucket = 2  # position agrees with belief
+        else:
+            align_bucket = 0  # position opposes belief (incentive to distort)
+
+        state = (conf_bucket, align_bucket)
+        self._last_comm_state = state
+
+        # ── Epsilon-greedy action selection ───────────────────────────────
+        # 0=TRUTHFUL  1=AMPLIFY  2=INVERT  3=SILENT  4=OFFER
+        # No action has a label — the agent discovers what each one does.
+        if self.rng.random() < self._comm_epsilon:
+            action = int(self.rng.integers(0, 5))
+        else:
+            action = int(np.argmax(self._comm_q[state[0], state[1]]))
+        self._last_comm_action = action
+
+        # ── Execute action ────────────────────────────────────────────────
+        if action == 3:  # SILENT: gather rather than broadcast
+            return self._make_ask(receiver, int(self.rng.integers(0, self.cfg.n_assets)), tick)
+
+        if action == 4:  # OFFER: sell the info commercially
+            price = self.cfg.signal_base_cost * (1.0 + confidence)
             msg = Message(
                 msg_id=self._msg_counter,
                 sender=self.agent_id,
                 receiver=receiver,
-                msg_type=MessageType.TELL,
+                msg_type=MessageType.OFFER,
                 tick=tick,
                 proposition_key=key,
-                predicted_value=fake_value,
-                confidence=0.95,  # asserted with high confidence despite disbelief
-                price=None,
+                predicted_value=value,
+                confidence=confidence,
+                price=price,
             )
             self._msg_counter += 1
+            self._pending_offers[msg.msg_id] = msg
             return msg
 
-        utility_share = self._utility_of_sharing(key, confidence)
-        utility_offer = self._utility_of_offering(key, confidence)
+        # TELL actions: 0=TRUTHFUL  1=AMPLIFY  2=INVERT
+        if action == 0:
+            communicated_value = value
+        elif action == 1:
+            communicated_value = current_price + 2.0 * expected_delta
+        else:  # action == 2
+            communicated_value = current_price - expected_delta
 
-        if utility_offer > utility_share and self.cash > self.cfg.signal_base_cost:
-            msg_type = MessageType.OFFER
-            price = self.cfg.signal_base_cost * (1.0 + confidence)
-        else:
-            msg_type = MessageType.TELL
-            price = None
+        if target_tick is not None:
+            self._sent_tells.append((key, communicated_value, target_tick))
 
         msg = Message(
             msg_id=self._msg_counter,
             sender=self.agent_id,
             receiver=receiver,
-            msg_type=msg_type,
+            msg_type=MessageType.TELL,
             tick=tick,
             proposition_key=key,
-            predicted_value=value,
+            predicted_value=communicated_value,
             confidence=confidence,
-            price=price,
+            price=None,
         )
         self._msg_counter += 1
-        if msg_type == MessageType.OFFER:
-            self._pending_offers[msg.msg_id] = msg
         return msg
 
     def _best_proposition_to_share(self, tick: int) -> Optional[Tuple[str, float, float]]:
@@ -226,14 +260,6 @@ class Agent:
             if best is None or prop.confidence > best[2]:
                 best = (prop.key, prop.value, prop.confidence)
         return best
-
-    def _utility_of_sharing(self, key: str, confidence: float) -> float:
-        w = self.preference_vector
-        return (w["influence"] * confidence + w["knowledge"] * 0.3) * 0.5
-
-    def _utility_of_offering(self, key: str, confidence: float) -> float:
-        w = self.preference_vector
-        return (w["wealth"] * confidence * self.cfg.signal_base_cost + w["influence"] * 0.2)
 
     def _make_ask(self, receiver: str, asset_idx: int, tick: int) -> Message:
         msg = Message(
@@ -370,7 +396,32 @@ class Agent:
             self._resolved_ev_total += 1
             if is_correct:
                 self._resolved_ev_correct += 1
+
+        # Resolve outgoing tells: did what I actually send turn out to be right?
+        # This measures the accuracy of communicated values (which may be biased),
+        # not the accuracy of the agent's internal beliefs.
+        remaining = []
+        for tell_key, tell_value, tell_tick in self._sent_tells:
+            if tell_tick > tick:
+                remaining.append((tell_key, tell_value, tell_tick))
+                continue
+            asset_idx = self._parse_asset_idx(tell_key)
+            if asset_idx is None:
+                continue
+            actual = float(world_fundamentals[asset_idx])
+            err = abs(tell_value - actual)
+            self._outgoing_total += 1
+            if err / (abs(actual) + 1e-9) < 0.10:
+                self._outgoing_confirmed += 1
+        self._sent_tells = remaining
+
         self.belief_graph.decay(tick, self.cfg.belief_decay)
+
+    def outgoing_accuracy(self) -> float:
+        """Fraction of sent TELL predictions that turned out to be correct."""
+        if self._outgoing_total == 0:
+            return 0.5  # neutral prior: no history yet
+        return self._outgoing_confirmed / self._outgoing_total
 
     # ------------------------------------------------------------------
     # Step 5: Update Intervention view
@@ -476,8 +527,10 @@ class Agent:
         from .reward import RewardModelName, compute_base_utility
         from .horizon import compute_agency_state
 
-        # Plain U model: no modulation
+        # Plain U model: no agency modulation on trading, but comm bias still adapts
         if self.reward_model.name == RewardModelName.U:
+            utility = compute_base_utility(self, market_prices)
+            self._update_comm_q(utility)
             return {"trade_scale": 1.0, "venture_scale": 1.0, "info_scale": 1.0}
 
         # Compute agency indices
@@ -501,13 +554,14 @@ class Agent:
 
         utility = compute_base_utility(self, market_prices)
         reward = self.reward_model.compute(utility, agency)
+        self._update_comm_q(reward)
 
         if agency.in_danger_zone:
             # ── Danger zone ────────────────────────────────────────────
             # Determine which dimension is weakest → prioritise restoring it
             ia_vec = agency.ia_vector
             weakest = int(np.argmin(ia_vec))
-            # [0]=liquidity [1]=epistemic [2]=network [3]=solvency
+            # [0]=liquidity [1]=epistemic [2]=network [3]=solvency [4]=options
             return {
                 "trade_scale": 0.2,           # pull back from speculative trading
                 "venture_scale": 0.05,        # freeze new ventures
@@ -529,6 +583,29 @@ class Agent:
                 "reward": reward,
                 "agency": agency,
             }
+
+    def _update_comm_q(self, current_reward: float) -> None:
+        """
+        Strategy graph update: adjust weights on (situation, action) pairs.
+
+        Each cell in _comm_q is the weight for one communication strategy
+        in one situation.  The weight of the strategy just used shifts toward
+        the observed reward delta — winning strategies grow heavier, losing
+        ones shrink.  Epsilon controls the mutation rate: early on agents
+        explore freely ('try this'); over time they commit to the highest-
+        weighted strategy in each situation.
+        """
+        reward_delta = current_reward - self._prev_reward_signal
+        if self._last_comm_state is not None and self._last_comm_action is not None:
+            s0, s1 = self._last_comm_state
+            a = self._last_comm_action
+            # TD(0): weight ← weight + lr × (observed_delta − current_weight)
+            self._comm_q[s0, s1, a] += 0.1 * (reward_delta - self._comm_q[s0, s1, a])
+            self._comm_q_visits[s0, s1, a] += 1
+
+        # Decay mutation rate: early exploration gives way to exploitation
+        self._comm_epsilon = max(0.05, self._comm_epsilon * 0.995)
+        self._prev_reward_signal = current_reward
 
     # ------------------------------------------------------------------
     # Step 7: Execute trade
