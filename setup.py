@@ -7,4 +7,9 @@ setup(
     python_requires=">=3.10",
     install_requires=["numpy>=1.24", "matplotlib>=3.7"],
     extras_require={"dev": ["pytest>=7.4", "networkx>=3.1"]},
+    entry_points={
+        "console_scripts": [
+            "insidetrade=train:main",
+        ],
+    },
 )
