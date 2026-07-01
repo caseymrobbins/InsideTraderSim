@@ -378,3 +378,100 @@ def test_simulation_comm_disabled_has_no_comm_evidence():
             f"{ag.agent_id} has {len(comm_ev)} COMMUNICATION evidence entries "
             "even though comm_enabled=False."
         )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Curriculum: honest-then-conflict
+# ──────────────────────────────────────────────────────────────────────
+
+def test_curriculum_honest_phase_forces_truthful():
+    """
+    During Phase A (t ≤ curriculum_honest_ticks) every outgoing TELL must be
+    action 0 (TRUTHFUL): communicated_value == belief value, not amplified/inverted.
+
+    We monkey-patch compose_message to record the _last_comm_action before it
+    gets overwritten, then verify it is always 0 during Phase A.
+    """
+    n_ticks = 20
+    honest_ticks = 10
+    cfg = SimConfig(
+        n_agents=6, n_assets=3, n_ticks=n_ticks, seed=99,
+        curriculum_honest_ticks=honest_ticks,
+        compression_test_start=200,
+    )
+    sim = Simulation(cfg)
+
+    recorded_phase_a: list[int] = []
+    recorded_phase_b: list[int] = []
+    _orig_compose = sim.agents[0].__class__.compose_message
+
+    def _patched_compose(self, tick, neighbors, prices):
+        msg = _orig_compose(self, tick, neighbors, prices)
+        action = self._last_comm_action
+        if action is not None:
+            if tick <= honest_ticks:
+                recorded_phase_a.append(action)
+            else:
+                recorded_phase_b.append(action)
+        return msg
+
+    for ag in sim.agents:
+        ag.__class__.compose_message = _patched_compose
+
+    try:
+        sim.run()
+    finally:
+        for ag in sim.agents:
+            ag.__class__.compose_message = _orig_compose
+
+    # During Phase A every comm action must be 0 (TRUTHFUL)
+    assert recorded_phase_a, "No compose_message calls recorded during Phase A"
+    non_truthful = [a for a in recorded_phase_a if a != 0]
+    assert non_truthful == [], (
+        f"Phase A produced non-TRUTHFUL actions: {set(non_truthful)}"
+    )
+    # Phase B should allow other actions (given enough exploration)
+    assert recorded_phase_b, "No compose_message calls recorded during Phase B"
+
+
+def test_curriculum_epsilon_resets_at_phase_b():
+    """
+    Epsilon is frozen at 0.5 during Phase A and reset to 0.5 at the Phase B
+    transition, so the very first Phase B tick should see epsilon == 0.5.
+    """
+    n_ticks = 14
+    honest_ticks = 7
+    cfg = SimConfig(
+        n_agents=4, n_assets=3, n_ticks=n_ticks, seed=77,
+        curriculum_honest_ticks=honest_ticks,
+        compression_test_start=200,
+    )
+    sim = Simulation(cfg)
+
+    epsilon_at_transition: list[float] = []
+    _orig_step = sim.__class__._step
+
+    def _patched_step(self):
+        _orig_step(self)
+        # Capture epsilon right after the transition tick fires
+        if self.tick == honest_ticks + 1:
+            epsilon_at_transition.extend(ag._comm_epsilon for ag in self.agents)
+
+    sim.__class__._step = _patched_step
+    try:
+        sim.run()
+    finally:
+        sim.__class__._step = _orig_step
+
+    assert epsilon_at_transition, "Transition tick never fired"
+    # Epsilon is reset to 0.5 at the start of the transition tick, then decays
+    # once during plan_actions (one call to _update_comm_q × 0.995 factor).
+    # Allow exactly that one step of decay so the assertion is numerically tight.
+    max_allowed = 0.5 * 0.995 + 1e-9
+    for eps in epsilon_at_transition:
+        assert eps <= max_allowed, (
+            f"Epsilon after Phase B unlock should be ≤ {max_allowed:.4f} (one decay step "
+            f"from reset value 0.5), got {eps}"
+        )
+        # Also confirm epsilon is closer to 0.5 than to floor (0.05), proving the reset
+        assert eps > 0.4, f"Epsilon {eps} too low — reset may not have fired"

@@ -107,6 +107,19 @@ def parse_args() -> argparse.Namespace:
         help="Directory for checkpoint files (default: checkpoints/).",
     )
 
+    # ── Curriculum ────────────────────────────────────────────────────
+    p.add_argument(
+        "--curriculum-honest-ticks",
+        type=int,
+        default=0,
+        metavar="N",
+        help=(
+            "Phase A: restrict agents to TRUTHFUL-only comms for the first N ticks; "
+            "Phase B (full action space incl. AMPLIFY/INVERT) unlocks at tick N+1.  "
+            "Default 0 = no curriculum.  Suggested: n_ticks // 2."
+        ),
+    )
+
     return p.parse_args()
 
 
@@ -175,6 +188,7 @@ def main() -> None:
         plot_dir=args.plot_dir,
         device=args.device,
         verbose=args.verbose,
+        curriculum_honest_ticks=args.curriculum_honest_ticks,
     )
 
     ckpt_path = _checkpoint_path(args.checkpoint_dir)
