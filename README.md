@@ -255,7 +255,12 @@ python run_simulation.py                   # skip-pretrain is the default
 
 ```bash
 pip install -r requirements.txt
-python run_simulation.py
+
+# Train all 5 models and run the full experiment suite in one command:
+python run_experiments.py --pretrain
+
+# Or run a single simulation with a chosen objective function:
+python run_simulation.py --reward-model UHFS
 ```
 
 ---
@@ -404,10 +409,36 @@ and epsilon reset at Phase B.
 
 ## Experiment Runner
 
-`run_experiments.py` runs all five reward models across scenarios and saves data
-at two levels:
+`run_experiments.py` trains all five models and runs the full experiment in one command:
+
+```bash
+# Train all 5 models + run experiments (the canonical single command)
+python run_experiments.py --pretrain
+
+# Customise pretraining depth and output location
+python run_experiments.py --pretrain --pretrain-ticks 150 \
+    --checkpoint-dir checkpoints --output-dir experiment_results
+
+# Skip pretraining if checkpoints already exist
+python run_experiments.py
+
+# Subset of models or scenarios
+python run_experiments.py --pretrain --models UHFS UH --trials 5
+python run_experiments.py --pretrain --scenarios high_vol
+```
+
+### What `--pretrain` does
+
+1. Runs solo pretraining for each reward model (`checkpoints/{model}/pretrained.json`)
+2. Runs the full `(model × scenario × seed)` trial grid, loading each model's checkpoint at the start of every trial
+3. Saves data at two levels:
 
 ```
+checkpoints/
+  U/pretrained.json
+  UF/pretrained.json
+  UH/ UHF/ UHFS/
+
 experiment_results/
   results.json          ← combined raw results (all models + MIXED)
   report.md             ← cross-model comparison report
@@ -420,20 +451,28 @@ experiment_results/
     report.md           ← per-model report
     model_comparison*.png
     …
-  UF/
-    results.json
-    …
-  UH/ UHF/ UHFS/        ← same structure
+  UF/ UH/ UHF/ UHFS/   ← same structure
   MIXED/
-    results.json        ← mixed-model trial data
+    results.json
     report.md
 ```
 
-```bash
-python run_experiments.py                          # all 5 models × 2 scenarios × 10 trials
-python run_experiments.py --models UHFS UH --trials 5   # subset
-python run_experiments.py --output-dir my_results  # custom output dir
-```
+### Experiment CLI flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--pretrain` | off | Solo-pretrain each model before running trials |
+| `--pretrain-ticks N` | 100 | Solo ticks per agent per model |
+| `--checkpoint-dir DIR` | `checkpoints` | Base directory for pretrained checkpoints |
+| `--trials N` | 10 | Trials per (model × scenario) cell |
+| `--output-dir DIR` | `experiment_results` | Where to write results, plots, and reports |
+| `--models …` | all 5 | Subset of models to run |
+| `--scenarios …` | both | `high_vol`, `moderate_vol`, or both |
+| `--no-mixed` | off | Skip the mixed-model test |
+| `--device cpu\|cuda` | cpu | Compute device |
+| `--n-agents N` | 30 | Agents per simulation |
+| `--n-ticks N` | 300 | Ticks per simulation |
+| `--seed-start N` | 0 | First seed (seeds are seed_start … seed_start+trials−1) |
 
 ---
 

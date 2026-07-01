@@ -61,10 +61,17 @@ def run_trial(
     verbose: bool = False,
 ) -> TrialResult:
     """Run one trial and return a TrialResult."""
+    import os
     cfg = build_sim_config(exp, scenario, reward_model, seed)
 
     t0 = time.perf_counter()
     sim = Simulation(cfg)
+
+    ckpt_path = exp.pretrained_checkpoints.get(reward_model)
+    if ckpt_path and os.path.exists(ckpt_path):
+        from inside_traders.checkpoint import load_checkpoint, apply_checkpoint
+        apply_checkpoint(sim.agents, load_checkpoint(ckpt_path), reset_comm=True)
+
     metrics = sim.run()
     elapsed = time.perf_counter() - t0
 
