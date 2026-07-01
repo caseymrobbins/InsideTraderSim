@@ -429,15 +429,32 @@ python run_experiments.py --pretrain --scenarios high_vol
 
 ### What `--pretrain` does
 
-1. Runs solo pretraining for each reward model (`checkpoints/{model}/pretrained.json`)
-2. Runs the full `(model × scenario × seed)` trial grid, loading each model's checkpoint at the start of every trial
+Each model goes through two training phases before any experiment trial runs:
+
+**Phase 1 — Solo pretrain** (`checkpoints/{model}/pretrained.json`)  
+Trains epistemic competence (preference vector, credibility scores) in an isolated
+world with no other agents. Reward model is forced to `RewardU` here so no
+danger-zone edge cases fire at zero network degree. Q-tables are NOT trained yet.
+
+**Phase 2 — Joint training sim** (`checkpoints/{model}/posttrain.json`)  
+Runs a full multi-agent simulation with the model's **actual** reward function.
+This is what trains the communication Q-tables so each model ends up with genuinely
+different weights before experiments start.
+
+Experiment trials then load `posttrain.json`, so every trial begins from a state
+where the Q-tables have already been shaped by that model's objective function.
+
 3. Saves data at two levels:
 
 ```
 checkpoints/
-  U/pretrained.json
-  UF/pretrained.json
-  UH/ UHF/ UHFS/
+  U/
+    pretrained.json   ← after Phase 1 (solo, Q-tables=0)
+    posttrain.json    ← after Phase 2 (joint training, Q-tables trained with U)
+  UF/
+    pretrained.json
+    posttrain.json    ← Q-tables trained with UF
+  UH/ UHF/ UHFS/     ← same structure
 
 experiment_results/
   results.json          ← combined raw results (all models + MIXED)
@@ -461,9 +478,11 @@ experiment_results/
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--pretrain` | off | Solo-pretrain each model before running trials |
-| `--pretrain-ticks N` | 100 | Solo ticks per agent per model |
-| `--checkpoint-dir DIR` | `checkpoints` | Base directory for pretrained checkpoints |
+| `--pretrain` | off | Full per-model training (solo pretrain + joint training sim) before running trials |
+| `--pretrain-ticks N` | 100 | Solo ticks per agent (Phase 1) |
+| `--train-ticks N` | 300 | Joint training ticks per model (Phase 2, trains Q-tables) |
+| `--curriculum-honest-ticks N` | 0 | During joint training, restrict to TRUTHFUL-only comms for first N ticks |
+| `--checkpoint-dir DIR` | `checkpoints` | Base directory for per-model checkpoints |
 | `--trials N` | 10 | Trials per (model × scenario) cell |
 | `--output-dir DIR` | `experiment_results` | Where to write results, plots, and reports |
 | `--models …` | all 5 | Subset of models to run |
