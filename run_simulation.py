@@ -120,6 +120,20 @@ def parse_args() -> argparse.Namespace:
         ),
     )
 
+    # ── Deception diagnostics ─────────────────────────────────────────
+    p.add_argument(
+        "--comm-debug-ticks",
+        type=int,
+        default=0,
+        metavar="N",
+        help=(
+            "Print a deception-chain trace to stderr for every AMPLIFY/INVERT "
+            "message during the first N ticks of Phase B (or from tick 1 with "
+            "no curriculum).  Shows sent vs true value, confidence, receiver "
+            "belief update, price impact, and sender position gain. Default 0 = off."
+        ),
+    )
+
     return p.parse_args()
 
 
@@ -189,6 +203,7 @@ def main() -> None:
         device=args.device,
         verbose=args.verbose,
         curriculum_honest_ticks=args.curriculum_honest_ticks,
+        comm_debug_ticks=args.comm_debug_ticks,
     )
 
     ckpt_path = _checkpoint_path(args.checkpoint_dir)
