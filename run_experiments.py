@@ -2,12 +2,16 @@
 """
 run_experiments.py — Full reward-model experiment suite.
 
-Runs all five reward models (U, UF, UH, UHF, UHFS) across two volatility
-scenarios with N trials per cell, then generates comparative statistics,
-plots, and a Markdown report.
+Trains all five reward models and runs comparative experiments in a single command:
 
-Usage:
-    python run_experiments.py [--trials N] [--output-dir DIR] [--device cpu|cuda]
+    python run_experiments.py --pretrain
+
+Without --pretrain, skips solo pretraining and runs the joint simulation directly
+(original behaviour, useful when checkpoints already exist).
+
+Full usage:
+    python run_experiments.py [--pretrain] [--pretrain-ticks N] [--checkpoint-dir DIR]
+                              [--trials N] [--output-dir DIR] [--device cpu|cuda]
                               [--no-mixed] [--scenarios high_vol moderate_vol]
                               [--models U UF UH UHF UHFS]
 """
@@ -50,6 +54,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--n-ticks",      type=int, default=300)
     p.add_argument("--seed-start",   type=int, default=0,
                    help="Starting seed (seeds will be seed_start, seed_start+1, ...)")
+
+    # Pretraining
+    p.add_argument("--pretrain",         action="store_true",
+                   help="Solo-pretrain each reward model before running experiments")
+    p.add_argument("--pretrain-ticks",   type=int, default=100,
+                   help="Solo ticks per agent during pretraining (default: 100)")
+    p.add_argument("--checkpoint-dir",   default="checkpoints",
+                   help="Base directory for pretrained checkpoints (default: checkpoints)")
     return p.parse_args()
 
 
@@ -81,8 +93,54 @@ def main() -> None:
     print(f"  Trials    : {exp.n_trials} per cell  ({total_cells} + {mixed_cells} mixed)")
     print(f"  Agents    : {exp.n_agents}  |  Ticks: {exp.n_ticks}")
     print(f"  Device    : {exp.device}")
+    print(f"  Pretrain  : {'yes (' + str(args.pretrain_ticks) + ' solo ticks/agent)' if args.pretrain else 'no'}")
     print(f"  Output    : {args.output_dir}/")
     print(f"{'='*60}\n")
+
+    # ------------------------------------------------------------------
+    # Optional pretraining: one solo run per reward model
+    # ------------------------------------------------------------------
+    pretrained_checkpoints: dict = {}
+    if args.pretrain:
+        from inside_traders.config import SimConfig
+        from inside_traders.pretrain import PretrainConfig, run_solo_pretrain
+
+        print(f"  Pretraining {len(exp.reward_models)} models "
+              f"({args.pretrain_ticks} solo ticks each) ...\n")
+        for model in exp.reward_models:
+            ckpt_path = os.path.join(args.checkpoint_dir, model, "pretrained.json")
+            plot_dir  = os.path.join("plots", model)
+            pretrain_cfg = PretrainConfig(
+                n_ticks=args.pretrain_ticks,
+                checkpoint_path=ckpt_path,
+                plot_dir=plot_dir,
+                verbose=False,
+            )
+            sim_cfg = SimConfig(
+                n_agents=exp.n_agents,
+                n_ticks=args.pretrain_ticks,
+                seed=args.seed_start,
+                device=args.device,
+                reward_model=model,
+            )
+            print(f"  [{model}] solo pretraining → {ckpt_path}")
+            run_solo_pretrain(sim_cfg, pretrain_cfg)
+            pretrained_checkpoints[model] = ckpt_path
+        print()
+
+        # Rebuild exp with checkpoint paths so each trial loads pretrained state
+        exp = ExperimentConfig(
+            reward_models=exp.reward_models,
+            n_trials=exp.n_trials,
+            base_seeds=exp.base_seeds,
+            scenario_names=exp.scenario_names,
+            n_agents=exp.n_agents,
+            n_ticks=exp.n_ticks,
+            device=exp.device,
+            output_dir=exp.output_dir,
+            run_mixed=exp.run_mixed,
+            pretrained_checkpoints=pretrained_checkpoints,
+        )
 
     t0 = time.perf_counter()
     runner = ExperimentRunner(exp, verbose=False)

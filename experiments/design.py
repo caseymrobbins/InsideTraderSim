@@ -17,7 +17,7 @@ This creates the compressed archetype: influential but epistemically degraded.
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 from inside_traders.config import SimConfig
 
@@ -66,6 +66,10 @@ class ExperimentConfig:
 
     # Mixed-model test
     run_mixed: bool = True
+
+    # Optional pretrained checkpoints: maps reward_model -> path
+    # When set, each trial loads the checkpoint before running the joint sim.
+    pretrained_checkpoints: Dict[str, str] = field(default_factory=dict)
 
 
 SCENARIOS: dict[str, ScenarioConfig] = {
