@@ -110,6 +110,11 @@ class Simulation:
         # ── Compression test ─────────────────────────────────────────
         self._compression_targets: List[str] = []
 
+        # ── Deception-chain diagnostic tracking ───────────────────────
+        # Set to the tick at which Phase B (or tick 1) starts; diagnostic
+        # prints run for cfg.comm_debug_ticks ticks after that.
+        self._debug_phase_b_start: int = 0
+
         # ── Timing ───────────────────────────────────────────────────
         self._t0: float = 0.0
         self._tick_times: List[float] = []  # rolling last-N tick durations
@@ -209,11 +214,14 @@ class Simulation:
             # Phase B unlocks: reset epsilon so agents can explore full action space
             for ag in self.agents:
                 ag._comm_epsilon = 0.5
+            self._debug_phase_b_start = t
             print(
                 f"\n  {_Y}[CURRICULUM]{_RS} tick {t}: Phase A → Phase B  "
                 f"(conflict unlocked, epsilon reset to 0.5)\n",
                 flush=True,
             )
+        if t == 1 and self.cfg.curriculum_honest_ticks == 0:
+            self._debug_phase_b_start = 1
 
         # ── 1. Hidden states evolve (on device) ──────────────────────
         self.world.step()
@@ -273,6 +281,62 @@ class Simulation:
             for ag in self.agents:
                 ag._current_neighbors = []
 
+        # ── 3b. Deception-chain diagnostic (stderr, controlled by comm_debug_ticks)
+        _debug_active = (
+            self.cfg.comm_debug_ticks > 0
+            and self._debug_phase_b_start > 0
+            and t >= self._debug_phase_b_start
+            and t < self._debug_phase_b_start + self.cfg.comm_debug_ticks
+        )
+        if _debug_active:
+            _action_names = {0: "TRUTH", 1: "AMPLIFY", 2: "INVERT", 3: "SILENT", 4: "OFFER"}
+            for msg in messages:
+                if msg.msg_type != MessageType.TELL:
+                    continue
+                sender = agent_map.get(msg.sender)
+                if sender is None or sender._last_comm_action not in (1, 2):
+                    continue  # only trace deceptive actions
+                recv = agent_map.get(msg.receiver)
+                recv_id = msg.receiver
+                state_lbl = (
+                    f"conf={sender._last_comm_state[0] if sender._last_comm_state else '?'}"
+                    f",align={sender._last_comm_state[1] if sender._last_comm_state else '?'}"
+                )
+                true_val = self.world.fundamentals[
+                    sender._parse_asset_idx(msg.proposition_key or "") or 0
+                ] if msg.proposition_key else 0.0
+                recv_old_conf = 0.0
+                if recv and msg.proposition_key:
+                    old_prop = recv.belief_graph.get(msg.proposition_key)
+                    recv_old_conf = old_prop.confidence if old_prop else 0.0
+                print(
+                    f"[DDBG t={t:3d}] {msg.sender}→{recv_id}"
+                    f" {_action_names[sender._last_comm_action]}"
+                    f" | sent_val={msg.predicted_value:.1f} true={true_val:.1f}"
+                    f" sent_conf={msg.confidence:.2f}"
+                    f" | recv_prior_conf={recv_old_conf:.2f}"
+                    f" | state({state_lbl})",
+                    file=sys.stderr, flush=True,
+                )
+                # Store for post-planning check
+                if not hasattr(self, "_dbg_deception_msgs"):
+                    self._dbg_deception_msgs = {}
+                self._dbg_deception_msgs[t] = self._dbg_deception_msgs.get(t, [])
+                self._dbg_deception_msgs[t].append({
+                    "sender": msg.sender,
+                    "receiver": recv_id,
+                    "action": sender._last_comm_action,
+                    "sent_val": msg.predicted_value,
+                    "true_val": true_val,
+                    "prop_key": msg.proposition_key,
+                    "sender_pos": float(sender.positions[
+                        sender._parse_asset_idx(msg.proposition_key or "") or 0
+                    ]) if msg.proposition_key else 0.0,
+                    "price_before": float(self.order_book.prices[
+                        sender._parse_asset_idx(msg.proposition_key or "") or 0
+                    ]) if msg.proposition_key else 0.0,
+                })
+
         # ── 4. Evidence resolution + belief updates ───────────────────
         for ag in self.agents:
             ag.resolve_evidence(t, self.world.fundamentals)
@@ -296,6 +360,41 @@ class Simulation:
                     self._propose_venture(ag, action, t)
                 elif action["type"] == "buy_signal":
                     self._buy_signal(ag, t)
+
+        # ── 6b. Post-planning deception-chain diagnostic ─────────────
+        if _debug_active and hasattr(self, "_dbg_deception_msgs"):
+            for dmsg in self._dbg_deception_msgs.get(t, []):
+                recv = agent_map.get(dmsg["receiver"])
+                sender = agent_map.get(dmsg["sender"])
+                ai = (sender._parse_asset_idx(dmsg["prop_key"] or "") or 0) if sender else 0
+                price_after = float(self.order_book.prices[ai])
+                price_delta = price_after - dmsg["price_before"]
+                recv_traded = any(
+                    a["type"] == "trade" and a["asset_idx"] == ai
+                    for a in (recv.plan_actions.__func__.__globals__.get("_last_actions", [])
+                               if recv else [])
+                )
+                # Check receiver's updated belief
+                recv_new_conf = 0.0
+                recv_new_val = 0.0
+                if recv and dmsg["prop_key"]:
+                    p = recv.belief_graph.get(dmsg["prop_key"])
+                    if p:
+                        recv_new_conf = p.confidence
+                        recv_new_val = p.value
+                # Check reward delta for sender
+                sender_rd = 0.0
+                if sender:
+                    sender_rd = sender._prev_reward_signal
+                print(
+                    f"[DDBG t={t:3d}]   ↳ recv belief: val={recv_new_val:.1f}"
+                    f" conf={recv_new_conf:.2f}"
+                    f" | price Δ={price_delta:+.3f}"
+                    f" | sender_pos={dmsg['sender_pos']:+.1f}"
+                    f" | position_gain={dmsg['sender_pos']*price_delta:+.2f}"
+                    f" | sender_prev_reward={sender_rd:.4f}",
+                    file=sys.stderr, flush=True,
+                )
 
         # ── 7. Resolve ventures ───────────────────────────────────────
         self._resolve_ventures(t)

@@ -170,6 +170,11 @@ def _pretrain_one(
     ag.reward_model = RewardU()
     # Clear neighbors so no residual comm state leaks in.
     ag._current_neighbors = []
+    # Freeze epsilon so the checkpoint always saves 0.5 (full exploration
+    # budget preserved for the joint phase).  Reuses the same flag that
+    # curriculum Phase A uses in the joint simulation.
+    _orig_honest_phase = ag._comm_honest_phase
+    ag._comm_honest_phase = True
 
     n_lo, n_hi = sim_cfg.cards_per_tick_range
 
@@ -203,8 +208,9 @@ def _pretrain_one(
             # 6. Wealth snapshot (drives reward signal for next planning step)
             ag.snapshot_wealth(order_book.prices)
     finally:
-        # Restore original reward model regardless of exceptions.
+        # Restore original reward model and honest-phase flag regardless of exceptions.
         ag.reward_model = _orig_rm
+        ag._comm_honest_phase = _orig_honest_phase
 
 
 def _execute_trade(ag: Agent, action: dict, order_book: OrderBook, tick: int) -> None:

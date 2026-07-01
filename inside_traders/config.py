@@ -96,5 +96,25 @@ class SimConfig:
     # unlocks at tick curriculum_honest_ticks + 1.  Set to 0 to disable.
     curriculum_honest_ticks: int = 0
 
+    # ---- Deception emergence: tuning knobs ----
+    # Minimum |utility| required to fire a trade order.  Lower = more responsive
+    # agents, stronger reaction to false beliefs planted by deceivers.
+    min_trade_utility: float = 0.001
+    # Confidence added to the message for AMPLIFY (action 1).  The boosted
+    # confidence makes the false value land with enough weight to shift the
+    # receiver's belief graph and pass their trading threshold.
+    amplify_conf_boost: float = 0.50
+    # Same for INVERT (action 2).
+    invert_conf_boost: float = 0.40
+    # Exploration probability for OFFER action (action 4) during epsilon-greedy
+    # random draws.  Lower than the 0.20 each other action would get with a
+    # uniform draw, so OFFER does not cannibalise AMPLIFY/INVERT exploration.
+    offer_explore_prob: float = 0.08
+
+    # ---- Diagnostic: deception-chain logging ----
+    # When > 0, print a one-line trace for every AMPLIFY/INVERT message for
+    # this many ticks after Phase B starts (or from tick 1 if no curriculum).
+    comm_debug_ticks: int = 0
+
     # ---- Preference vector weights (names only; values randomised per agent) ----
     preference_dimensions: tuple = ("wealth", "influence", "security", "knowledge", "autonomy")

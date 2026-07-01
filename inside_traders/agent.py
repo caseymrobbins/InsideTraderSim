@@ -197,11 +197,19 @@ class Agent:
         # ── Epsilon-greedy action selection ───────────────────────────────
         # 0=TRUTHFUL  1=AMPLIFY  2=INVERT  3=SILENT  4=OFFER
         # No action has a label — the agent discovers what each one does.
+        #
+        # Exploration uses a weighted draw so OFFER (action 4) gets a lower
+        # share of random trials than AMPLIFY/INVERT, preventing OFFER from
+        # cannibalising deception-action exploration.
+        # Remaining probability distributed equally over {0,1,2,3}.
+        _p_offer = self.cfg.offer_explore_prob
+        _p_other = (1.0 - _p_offer) / 4.0
+        _explore_probs = [_p_other, _p_other, _p_other, _p_other, _p_offer]
         if self._comm_honest_phase:
             # Curriculum Phase A: only TRUTHFUL allowed; epsilon frozen
             action = 0
         elif self.rng.random() < self._comm_epsilon:
-            action = int(self.rng.integers(0, 5))
+            action = int(self.rng.choice(5, p=_explore_probs))
         else:
             action = int(np.argmax(self._comm_q[state[0], state[1]]))
         self._last_comm_action = action
@@ -228,12 +236,18 @@ class Agent:
             return msg
 
         # TELL actions: 0=TRUTHFUL  1=AMPLIFY  2=INVERT
+        # AMPLIFY and INVERT boost the communicated confidence so the false value
+        # lands with enough weight to shift the receiver's belief graph and
+        # overcome their trading threshold.  TRUTHFUL sends the real confidence.
         if action == 0:
             communicated_value = value
+            communicated_confidence = confidence
         elif action == 1:
             communicated_value = current_price + 2.0 * expected_delta
+            communicated_confidence = min(0.95, confidence + self.cfg.amplify_conf_boost)
         else:  # action == 2
             communicated_value = current_price - expected_delta
+            communicated_confidence = min(0.95, confidence + self.cfg.invert_conf_boost)
 
         if target_tick is not None:
             self._sent_tells.append((key, communicated_value, target_tick))
@@ -246,7 +260,7 @@ class Agent:
             tick=tick,
             proposition_key=key,
             predicted_value=communicated_value,
-            confidence=confidence,
+            confidence=communicated_confidence,
             price=None,
         )
         self._msg_counter += 1
@@ -475,7 +489,7 @@ class Agent:
             base_utility = risk_adj_return * w["wealth"] - abs(risk_adj_return) * w["security"] * 0.5
             modulated_utility = base_utility * trade_scale
 
-            if abs(modulated_utility) < 0.005:
+            if abs(modulated_utility) < self.cfg.min_trade_utility:
                 continue
 
             desired_position = self.cfg.max_position * confidence * np.sign(modulated_utility)
