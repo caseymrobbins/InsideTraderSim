@@ -17,3 +17,5 @@ venv/
 sweep_results.csv
 experiment_results_smoke/
 checkpoints/
+# Generated root-level plot PNGs from run_all_plots()
+/*.png
