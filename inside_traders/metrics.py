@@ -1,7 +1,7 @@
 """Metrics collection, POLI×EH calculations, and Gini coefficient."""
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 import numpy as np
 
 if TYPE_CHECKING:
@@ -46,17 +46,54 @@ class MetricsCollector:
         self._venture_succeeded: int = 0
         self._tells_total: int = 0
         self._tells_deceptive: int = 0
+        # Per-alignment-bucket counts for the incentive-linkage test.
+        # Keys: 0=against (position opposes belief → pays-to-lie state),
+        #       1=neutral, 2=with (position agrees → pays-to-be-honest state).
+        # Value: [total_tells, deceptive_tells]
+        self._tells_by_align: Dict[int, List[int]] = {0: [0, 0], 1: [0, 0], 2: [0, 0]}
 
     def record_venture(self, succeeded: bool) -> None:
         self._venture_resolved += 1
         if succeeded:
             self._venture_succeeded += 1
 
-    def record_tell(self, is_deceptive: bool) -> None:
-        """Record a TELL message. is_deceptive=True when action was AMPLIFY or INVERT."""
+    def record_tell(self, is_deceptive: bool, align_bucket: int = 1) -> None:
+        """Record a TELL message. is_deceptive=True when action was AMPLIFY or INVERT.
+
+        align_bucket: 0=against (position opposes belief, pays-to-lie state),
+                      1=neutral, 2=with (position agrees, pays-to-be-honest state).
+        """
         self._tells_total += 1
         if is_deceptive:
             self._tells_deceptive += 1
+        bucket = align_bucket if align_bucket in (0, 1, 2) else 1
+        self._tells_by_align[bucket][0] += 1
+        if is_deceptive:
+            self._tells_by_align[bucket][1] += 1
+
+    def reset_linkage_counters(self) -> None:
+        """Zero the per-alignment deception counters.
+
+        Used to measure incentive-linkage over the CONVERGED phase only: the
+        cumulative counts over all of Phase B are dominated by early epsilon-greedy
+        exploration (≈uniform actions), which dilutes the learned linkage.  Call
+        once after exploration has decayed to read the learned policy's linkage.
+        """
+        self._tells_by_align = {0: [0, 0], 1: [0, 0], 2: [0, 0]}
+
+    def incentive_linkage_stats(self) -> Dict[str, Tuple[int, int, float]]:
+        """Deception counts and rate per alignment bucket for the incentive-linkage test.
+
+        Returns {label: (total_tells, deceptive_tells, deception_rate)} where
+        label is one of 'against' | 'neutral' | 'with'.
+        The fix is verified if deception_rate['against'] > deception_rate['with'].
+        """
+        labels = {0: "against", 1: "neutral", 2: "with"}
+        result: Dict[str, Tuple[int, int, float]] = {}
+        for bucket, (total, deceptive) in self._tells_by_align.items():
+            rate = deceptive / total if total > 0 else 0.0
+            result[labels[bucket]] = (total, deceptive, rate)
+        return result
 
     def snapshot(
         self,

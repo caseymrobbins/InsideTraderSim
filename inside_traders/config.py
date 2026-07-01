@@ -111,6 +111,26 @@ class SimConfig:
     # uniform draw, so OFFER does not cannibalise AMPLIFY/INVERT exploration.
     offer_explore_prob: float = 0.08
 
+    # ---- Incentive-loop coupling (the closed sender-payoff loop) ----
+    # Gain on the IMMEDIATE influence payoff: how much the receiver's induced
+    # trade (in the sender's position direction) feeds the sender's comm Q-update.
+    # The raw per-signal PnL of one receiver's trade is tiny relative to the noisy
+    # 30-agent total-reward signal, so it must be amplified to reach the learner.
+    # This is the payoff coupling, NOT a lie-propensity knob: it rewards
+    # *influence*, and the learner still discovers whether truth or deception
+    # produces favourable influence in each state.
+    comm_influence_gain: float = 60.0
+    # Weight on the DELAYED reputation payoff: the change in the receiver's
+    # credibility toward the sender after the sender's claim resolves.  Positive
+    # for honest/confirmed claims, negative for deceptive/refuted ones.  This is
+    # the reputation cost that makes exaggeration in a favourable position
+    # net-negative while inverting against one's position can still pay — the
+    # tension that produces incentive-linked (state-dependent) deception.
+    # Calibrated with comm_influence_gain on the converged-phase linkage sweep so
+    # lying can still pay in a position-vs-belief conflict while honesty dominates
+    # when the position is aligned — not hand-set to a target deception rate.
+    comm_reputation_weight: float = 0.3
+
     # ---- Diagnostic: deception-chain logging ----
     # When > 0, print a one-line trace for every AMPLIFY/INVERT message for
     # this many ticks after Phase B starts (or from tick 1 if no curriculum).

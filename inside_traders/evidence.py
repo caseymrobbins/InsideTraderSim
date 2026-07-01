@@ -32,6 +32,11 @@ class Evidence:
     status: EvidenceStatus = EvidenceStatus.PENDING
     actual_value: Optional[float] = None
     error: Optional[float] = None    # |predicted - actual| after resolution
+    # For OBSERVATION evidence only: the true fundamental at the time the card
+    # was issued.  Resolution compares predicted_value against this rather than
+    # the future actual, so EH measures signal quality not price-forecasting
+    # skill across drifting fundamentals (which would REFUTE everything).
+    true_value_at_issue: Optional[float] = None
 
 
 @dataclass
