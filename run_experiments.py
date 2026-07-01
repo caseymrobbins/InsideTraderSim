@@ -55,13 +55,24 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--seed-start",   type=int, default=0,
                    help="Starting seed (seeds will be seed_start, seed_start+1, ...)")
 
-    # Pretraining
+    # Pretraining + joint training
     p.add_argument("--pretrain",         action="store_true",
-                   help="Solo-pretrain each reward model before running experiments")
+                   help=(
+                       "Full per-model training: (1) solo pretrain each agent, "
+                       "(2) run a joint training simulation with that model's reward "
+                       "function so Q-tables are trained before experiments start"
+                   ))
     p.add_argument("--pretrain-ticks",   type=int, default=100,
-                   help="Solo ticks per agent during pretraining (default: 100)")
+                   help="Solo ticks per agent (default: 100)")
+    p.add_argument("--train-ticks",      type=int, default=300,
+                   help="Joint training ticks per model (default: 300)")
+    p.add_argument("--curriculum-honest-ticks", type=int, default=0, metavar="N",
+                   help=(
+                       "During joint training, restrict comms to TRUTHFUL-only for "
+                       "first N ticks, then unlock full action space (default: 0)"
+                   ))
     p.add_argument("--checkpoint-dir",   default="checkpoints",
-                   help="Base directory for pretrained checkpoints (default: checkpoints)")
+                   help="Base directory for per-model checkpoints (default: checkpoints)")
     return p.parse_args()
 
 
@@ -93,42 +104,92 @@ def main() -> None:
     print(f"  Trials    : {exp.n_trials} per cell  ({total_cells} + {mixed_cells} mixed)")
     print(f"  Agents    : {exp.n_agents}  |  Ticks: {exp.n_ticks}")
     print(f"  Device    : {exp.device}")
-    print(f"  Pretrain  : {'yes (' + str(args.pretrain_ticks) + ' solo ticks/agent)' if args.pretrain else 'no'}")
+    if args.pretrain:
+        pretrain_desc = (f"yes  (solo {args.pretrain_ticks} ticks + "
+                         f"joint {args.train_ticks} ticks/model)")
+    else:
+        pretrain_desc = "no (load existing checkpoints if present)"
+    print(f"  Pretrain  : {pretrain_desc}")
     print(f"  Output    : {args.output_dir}/")
     print(f"{'='*60}\n")
 
     # ------------------------------------------------------------------
-    # Optional pretraining: one solo run per reward model
+    # Optional training: solo pretrain + joint training sim per model
+    # ------------------------------------------------------------------
+    # Each model goes through two phases:
+    #   Phase 1 – Solo pretrain: builds epistemic competence (preference vector,
+    #             credibility scores) in an isolated world. Reward model is forced
+    #             to RewardU so no danger-zone edge cases fire with 0 neighbours.
+    #   Phase 2 – Joint training sim: runs a full multi-agent simulation with the
+    #             model's ACTUAL reward function. This is what trains the comm
+    #             Q-tables so each model's agents genuinely have different weights
+    #             before the experiment trials start.
+    # The posttrain checkpoint (Phase 2 output) is what experiment trials load.
     # ------------------------------------------------------------------
     pretrained_checkpoints: dict = {}
     if args.pretrain:
         from inside_traders.config import SimConfig
         from inside_traders.pretrain import PretrainConfig, run_solo_pretrain
+        from inside_traders.simulation import Simulation as _Sim
+        from inside_traders.checkpoint import (
+            load_checkpoint as _load_ckpt,
+            apply_checkpoint as _apply_ckpt,
+            save_checkpoint as _save_ckpt,
+        )
 
-        print(f"  Pretraining {len(exp.reward_models)} models "
-              f"({args.pretrain_ticks} solo ticks each) ...\n")
+        n_models = len(exp.reward_models)
+        print(f"  Training {n_models} models ...\n")
+
         for model in exp.reward_models:
-            ckpt_path = os.path.join(args.checkpoint_dir, model, "pretrained.json")
-            plot_dir  = os.path.join("plots", model)
-            pretrain_cfg = PretrainConfig(
-                n_ticks=args.pretrain_ticks,
-                checkpoint_path=ckpt_path,
-                plot_dir=plot_dir,
-                verbose=False,
-            )
-            sim_cfg = SimConfig(
+            model_dir   = os.path.join(args.checkpoint_dir, model)
+            os.makedirs(model_dir, exist_ok=True)
+            plot_dir    = os.path.join("plots", model)
+            solo_ckpt   = os.path.join(model_dir, "pretrained.json")
+            joint_ckpt  = os.path.join(model_dir, "posttrain.json")
+
+            # ── Phase 1: solo pretrain ──────────────────────────────
+            print(f"  [{model}] Phase 1 — solo pretrain ({args.pretrain_ticks} ticks/agent)")
+            solo_cfg = SimConfig(
                 n_agents=exp.n_agents,
                 n_ticks=args.pretrain_ticks,
                 seed=args.seed_start,
                 device=args.device,
                 reward_model=model,
+                plot_dir=plot_dir,
+                plot_interval=9999,
+                status_interval=9999,
             )
-            print(f"  [{model}] solo pretraining → {ckpt_path}")
-            run_solo_pretrain(sim_cfg, pretrain_cfg)
-            pretrained_checkpoints[model] = ckpt_path
-        print()
+            run_solo_pretrain(solo_cfg, PretrainConfig(
+                n_ticks=args.pretrain_ticks,
+                checkpoint_path=solo_ckpt,
+                plot_dir=plot_dir,
+                verbose=False,
+            ))
 
-        # Rebuild exp with checkpoint paths so each trial loads pretrained state
+            # ── Phase 2: joint training sim ─────────────────────────
+            print(f"  [{model}] Phase 2 — joint training  ({args.train_ticks} ticks, "
+                  f"reward={model})")
+            joint_cfg = SimConfig(
+                n_agents=exp.n_agents,
+                n_ticks=args.train_ticks,
+                seed=args.seed_start,
+                device=args.device,
+                reward_model=model,
+                curriculum_honest_ticks=args.curriculum_honest_ticks,
+                plot_dir=plot_dir,
+                plot_interval=9999,
+                status_interval=9999,
+                verbose=False,
+            )
+            joint_sim = _Sim(joint_cfg)
+            _apply_ckpt(joint_sim.agents, _load_ckpt(solo_ckpt), reset_comm=True)
+            joint_sim.run()
+            _save_ckpt(joint_sim.agents, joint_ckpt)
+            print(f"  [{model}] posttrain checkpoint → {joint_ckpt}\n")
+
+            pretrained_checkpoints[model] = joint_ckpt
+
+        # Rebuild exp with posttrain checkpoint paths
         exp = ExperimentConfig(
             reward_models=exp.reward_models,
             n_trials=exp.n_trials,

@@ -254,13 +254,12 @@ python run_simulation.py                   # skip-pretrain is the default
 ## Quick Start
 
 ```bash
-pip install -r requirements.txt
+pip install -e .          # installs the 'insidetrade' command
+insidetrade               # train all 5 models + run experiments
 
-# Train all 5 models and run the full experiment suite in one command:
-python run_experiments.py --pretrain
-
-# Or run a single simulation with a chosen objective function:
-python run_simulation.py --reward-model UHFS
+# Or without installing:
+python train.py           # same thing
+python train.py --quick   # fast smoke test (reduced ticks + 2 trials)
 ```
 
 ---
@@ -409,35 +408,53 @@ and epsilon reset at Phase B.
 
 ## Experiment Runner
 
-`run_experiments.py` trains all five models and runs the full experiment in one command:
+`train.py` is the canonical entry point. It trains all five models and runs
+the full experiment grid in one command, with no required flags:
 
 ```bash
-# Train all 5 models + run experiments (the canonical single command)
-python run_experiments.py --pretrain
+python train.py                         # full run — recommended
+python train.py --quick                 # smoke test (30+100 ticks, 2 trials)
+python train.py --device cuda           # GPU
+python train.py --train-ticks 500 --trials 20
+python train.py --models UHFS UH        # subset of models
+python train.py --scenarios high_vol    # single scenario
+python train.py --skip-training         # skip to experiments using saved checkpoints
+```
 
-# Customise pretraining depth and output location
-python run_experiments.py --pretrain --pretrain-ticks 150 \
-    --checkpoint-dir checkpoints --output-dir experiment_results
-
-# Skip pretraining if checkpoints already exist
-python run_experiments.py
-
-# Subset of models or scenarios
-python run_experiments.py --pretrain --models UHFS UH --trials 5
-python run_experiments.py --pretrain --scenarios high_vol
+After `pip install -e .` you can also run it as:
+```bash
+insidetrade
+insidetrade --quick
 ```
 
 ### What `--pretrain` does
 
-1. Runs solo pretraining for each reward model (`checkpoints/{model}/pretrained.json`)
-2. Runs the full `(model × scenario × seed)` trial grid, loading each model's checkpoint at the start of every trial
+Each model goes through two training phases before any experiment trial runs:
+
+**Phase 1 — Solo pretrain** (`checkpoints/{model}/pretrained.json`)  
+Trains epistemic competence (preference vector, credibility scores) in an isolated
+world with no other agents. Reward model is forced to `RewardU` here so no
+danger-zone edge cases fire at zero network degree. Q-tables are NOT trained yet.
+
+**Phase 2 — Joint training sim** (`checkpoints/{model}/posttrain.json`)  
+Runs a full multi-agent simulation with the model's **actual** reward function.
+This is what trains the communication Q-tables so each model ends up with genuinely
+different weights before experiments start.
+
+Experiment trials then load `posttrain.json`, so every trial begins from a state
+where the Q-tables have already been shaped by that model's objective function.
+
 3. Saves data at two levels:
 
 ```
 checkpoints/
-  U/pretrained.json
-  UF/pretrained.json
-  UH/ UHF/ UHFS/
+  U/
+    pretrained.json   ← after Phase 1 (solo, Q-tables=0)
+    posttrain.json    ← after Phase 2 (joint training, Q-tables trained with U)
+  UF/
+    pretrained.json
+    posttrain.json    ← Q-tables trained with UF
+  UH/ UHF/ UHFS/     ← same structure
 
 experiment_results/
   results.json          ← combined raw results (all models + MIXED)
@@ -457,22 +474,25 @@ experiment_results/
     report.md
 ```
 
-### Experiment CLI flags
+### `train.py` flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--pretrain` | off | Solo-pretrain each model before running trials |
-| `--pretrain-ticks N` | 100 | Solo ticks per agent per model |
-| `--checkpoint-dir DIR` | `checkpoints` | Base directory for pretrained checkpoints |
-| `--trials N` | 10 | Trials per (model × scenario) cell |
-| `--output-dir DIR` | `experiment_results` | Where to write results, plots, and reports |
-| `--models …` | all 5 | Subset of models to run |
+| `--quick` | off | Smoke test: 30+100 ticks, 2 trials, no mixed test |
+| `--skip-training` | off | Skip Phases 1+2 and load existing posttrain checkpoints |
+| `--pretrain-ticks N` | 100 | Solo ticks per agent — Phase 1 |
+| `--train-ticks N` | 300 | Joint training ticks per model — Phase 2 |
+| `--eval-ticks N` | 300 | Ticks per experiment trial |
+| `--curriculum N` | 0 | TRUTHFUL-only comms for first N ticks of joint training |
+| `--checkpoints DIR` | `checkpoints` | Base directory for per-model checkpoints |
+| `--trials N` | 10 | Experiment trials per (model × scenario) cell |
+| `--output DIR` | `experiment_results` | Output directory for results, plots, and reports |
+| `--agents N` | 30 | Agents per simulation |
+| `--seed N` | 0 | Starting seed |
+| `--models …` | all 5 | Subset of models: `U UF UH UHF UHFS` |
 | `--scenarios …` | both | `high_vol`, `moderate_vol`, or both |
 | `--no-mixed` | off | Skip the mixed-model test |
 | `--device cpu\|cuda` | cpu | Compute device |
-| `--n-agents N` | 30 | Agents per simulation |
-| `--n-ticks N` | 300 | Ticks per simulation |
-| `--seed-start N` | 0 | First seed (seeds are seed_start … seed_start+trials−1) |
 
 ---
 
