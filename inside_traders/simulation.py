@@ -333,14 +333,19 @@ class Simulation:
             f" {_R}[COMPRESS]{_RS}" if t >= self.cfg.compression_test_start else ""
         )
 
-        # Build the status line
+        # Build the status line (includes mean EH for epistemic health tracking)
+        mean_eh = float(np.mean(snap.eh)) if len(snap.eh) > 0 else 0.0
+        corr = (float(np.corrcoef(snap.poli, snap.eh)[0, 1])
+                if len(snap.poli) >= 2 else float("nan"))
         bar = _sparkbar(np.sort(wealth_np)[::-1])
         prices_str = " ".join(f"{p:.0f}" for p in self.order_book.prices[:3])
         print(
             f"{_B}tick {t:>4}/{self.cfg.n_ticks}{_RS}"
             f" │ {_G}wealth_tot={snap.total_wealth:>10.1f}{_RS}"
             f" │ {_Y}gini={gini:.3f}{_RS}"
-            f" │ {_C}trust={snap.mean_trust:.3f}{_RS}"
+            f" │ {_C}EH={mean_eh:.3f}{_RS}"
+            f" │ r(POLI,EH)={corr:+.2f}"
+            f" │ trust={snap.mean_trust:.3f}"
             f" │ decept={snap.deception_rate:.3f}"
             f" │ ventures={n_active:>2}"
             f" │ px=[{prices_str}…]"

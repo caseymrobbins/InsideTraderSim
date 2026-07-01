@@ -45,6 +45,7 @@ class PretrainConfig:
     """Configuration for the solo pretraining phase."""
     n_ticks: int = 100
     checkpoint_path: str = "checkpoints/pretrained.json"
+    plot_dir: str = "plots"
     verbose: bool = False
 
 
@@ -93,6 +94,12 @@ def run_solo_pretrain(
     print(f"\n  Pretraining complete  ({elapsed:.2f}s)")
     print(f"  Saving checkpoint → {pretrain_cfg.checkpoint_path}")
     save_checkpoint(agents, pretrain_cfg.checkpoint_path)
+
+    # Save a post-pretrain summary dashboard
+    from . import visualization as viz
+    dash_path = viz.plot_pretrain_dashboard(agents, plot_dir=pretrain_cfg.plot_dir)
+    print(f"  Pretrain dashboard  → {dash_path}")
+
     return agents
 
 

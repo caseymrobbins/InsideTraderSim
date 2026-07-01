@@ -189,6 +189,7 @@ def main() -> None:
         pretrain_cfg = PretrainConfig(
             n_ticks=args.pretrain_ticks,
             checkpoint_path=ckpt_path,
+            plot_dir=args.plot_dir,
             verbose=args.verbose,
         )
         run_solo_pretrain(cfg, pretrain_cfg)
