@@ -16,3 +16,4 @@ build/
 venv/
 sweep_results.csv
 experiment_results_smoke/
+checkpoints/
