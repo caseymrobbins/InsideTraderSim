@@ -56,6 +56,9 @@ def parse_args() -> argparse.Namespace:
                    help="Directory to write plot files into")
     p.add_argument("--device", type=str, default="cpu", choices=["cpu", "cuda"],
                    help="Compute device: 'cpu' (default) or 'cuda' for A100/GPU")
+    p.add_argument("--reward-model", type=str, default="U",
+                   choices=["U", "UF", "UH", "UHF", "UHFS"],
+                   help="Reward / objective function model (default: U)")
     p.add_argument("--verbose", action="store_true")
     p.add_argument("--no-plots", action="store_true")
     p.add_argument("--gini-target", type=float, default=None,
@@ -177,8 +180,9 @@ def print_summary(sim: Simulation) -> None:
     print("=" * 60)
 
 
-def _checkpoint_path(checkpoint_dir: str) -> str:
-    return os.path.join(checkpoint_dir, "pretrained.json")
+def _model_checkpoint_dir(base_dir: str, reward_model: str) -> str:
+    """Return a per-model subdirectory under base_dir."""
+    return os.path.join(base_dir, reward_model)
 
 
 def main() -> None:
@@ -190,6 +194,11 @@ def main() -> None:
         stream=sys.stderr,
     )
 
+    # Namespace checkpoint and plot directories by reward model so each
+    # objective function's training artefacts are fully isolated.
+    checkpoint_dir = _model_checkpoint_dir(args.checkpoint_dir, args.reward_model)
+    plot_dir = os.path.join(args.plot_dir, args.reward_model)
+
     cfg = SimConfig(
         n_agents=args.agents,
         n_assets=args.assets,
@@ -199,14 +208,19 @@ def main() -> None:
         log_interval=args.log_interval,
         status_interval=args.status_interval,
         plot_interval=args.plot_interval,
-        plot_dir=args.plot_dir,
+        plot_dir=plot_dir,
         device=args.device,
         verbose=args.verbose,
         curriculum_honest_ticks=args.curriculum_honest_ticks,
         comm_debug_ticks=args.comm_debug_ticks,
+        reward_model=args.reward_model,
     )
 
-    ckpt_path = _checkpoint_path(args.checkpoint_dir)
+    ckpt_path = os.path.join(checkpoint_dir, "pretrained.json")
+
+    print(f"\n  Reward model : {args.reward_model}")
+    print(f"  Checkpoints  : {checkpoint_dir}/")
+    print(f"  Plots        : {plot_dir}/\n")
 
     # ------------------------------------------------------------------
     # Step 1: Pretraining (if requested)
@@ -218,7 +232,7 @@ def main() -> None:
         pretrain_cfg = PretrainConfig(
             n_ticks=args.pretrain_ticks,
             checkpoint_path=ckpt_path,
-            plot_dir=args.plot_dir,
+            plot_dir=plot_dir,
             verbose=args.verbose,
         )
         run_solo_pretrain(cfg, pretrain_cfg)
@@ -226,7 +240,7 @@ def main() -> None:
         if args.pretrain_only:
             print(f"\n  Checkpoint saved to {ckpt_path}")
             print("  Run the joint simulation with:")
-            print(f"    python run_simulation.py --resume-from {ckpt_path}\n")
+            print(f"    python run_simulation.py --reward-model {args.reward_model} --resume-from {ckpt_path}\n")
             return
 
         # Load the freshly written checkpoint for the joint phase
@@ -255,8 +269,8 @@ def main() -> None:
     # Save post-training checkpoint so learned Q-tables and credibility scores
     # can be loaded for subsequent fine-tuning or analysis runs.
     from inside_traders.checkpoint import save_checkpoint
-    posttrain_path = os.path.join(args.checkpoint_dir, "posttrain.json")
-    os.makedirs(args.checkpoint_dir, exist_ok=True)
+    posttrain_path = os.path.join(checkpoint_dir, "posttrain.json")
+    os.makedirs(checkpoint_dir, exist_ok=True)
     save_checkpoint(sim.agents, posttrain_path)
     print(f"\n  Post-training checkpoint saved to {posttrain_path}")
 
