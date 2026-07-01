@@ -212,51 +212,57 @@ class Simulation:
             ag.receive_cards(cards, t)
 
         # ── 3. Communication round ────────────────────────────────────
-        messages: List[Message] = []
-        for ag in self.agents:
-            neighbors = self.comm_graph.neighbors(ag.agent_id)
-            msg = ag.compose_message(t, neighbors, self.order_book.prices)
-            if msg is not None:
-                messages.append(msg)
-
         agent_map = {ag.agent_id: ag for ag in self.agents}
-        replies: List[Message] = []
-        for msg in messages:
-            receiver = agent_map.get(msg.receiver)
-            if receiver is None:
-                continue
-            reply = receiver.receive_message(msg, t)
-            if reply is not None:
-                replies.append(reply)
-
-        for reply in replies:
-            if reply.msg_type == MessageType.ACCEPT:
-                sender = agent_map.get(reply.receiver)
-                receiver = agent_map.get(reply.sender)
-                if sender and receiver and reply.price:
-                    if receiver.pay(reply.price):
-                        sender.receive_payment(reply.price)
-                        offer_msg = sender._pending_offers.get(reply.offer_id or -1)
-                        if offer_msg:
-                            receiver.receive_message(offer_msg, t)
-            elif reply.msg_type == MessageType.TELL:
-                orig_asker = agent_map.get(reply.receiver)
-                if orig_asker:
-                    orig_asker.receive_message(reply, t)
-
-        # INTRODUCE
-        for ag in self.agents:
-            if self.rng.random() < self.cfg.introduce_prob:
+        messages: List[Message] = []
+        if self.cfg.comm_enabled:
+            for ag in self.agents:
                 neighbors = self.comm_graph.neighbors(ag.agent_id)
-                if len(neighbors) >= 2:
-                    a, b = self.rng.choice(neighbors, size=2, replace=False)
-                    self.comm_graph.introduce(a, b)
-                    self.comm_graph.introduce(b, a)
+                msg = ag.compose_message(t, neighbors, self.order_book.prices)
+                if msg is not None:
+                    messages.append(msg)
+
+            replies: List[Message] = []
+            for msg in messages:
+                receiver = agent_map.get(msg.receiver)
+                if receiver is None:
+                    continue
+                reply = receiver.receive_message(msg, t)
+                if reply is not None:
+                    replies.append(reply)
+
+            for reply in replies:
+                if reply.msg_type == MessageType.ACCEPT:
+                    sender = agent_map.get(reply.receiver)
+                    receiver = agent_map.get(reply.sender)
+                    if sender and receiver and reply.price:
+                        if receiver.pay(reply.price):
+                            sender.receive_payment(reply.price)
+                            offer_msg = sender._pending_offers.get(reply.offer_id or -1)
+                            if offer_msg:
+                                receiver.receive_message(offer_msg, t)
+                elif reply.msg_type == MessageType.TELL:
+                    orig_asker = agent_map.get(reply.receiver)
+                    if orig_asker:
+                        orig_asker.receive_message(reply, t)
+
+            # INTRODUCE
+            for ag in self.agents:
+                if self.rng.random() < self.cfg.introduce_prob:
+                    neighbors = self.comm_graph.neighbors(ag.agent_id)
+                    if len(neighbors) >= 2:
+                        a, b = self.rng.choice(neighbors, size=2, replace=False)
+                        self.comm_graph.introduce(a, b)
+                        self.comm_graph.introduce(b, a)
+        else:
+            # comm_enabled=False: clear neighbor lists so agency indices reflect isolation
+            for ag in self.agents:
+                ag._current_neighbors = []
 
         # ── 4. Evidence resolution + belief updates ───────────────────
         for ag in self.agents:
             ag.resolve_evidence(t, self.world.fundamentals)
-        self._update_deception_metrics(messages, agent_map, t)
+        if self.cfg.comm_enabled:
+            self._update_deception_metrics(messages, agent_map, t)
 
         # ── 5. Compression test ───────────────────────────────────────
         if t == self.cfg.compression_test_start:

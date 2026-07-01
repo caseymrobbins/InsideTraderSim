@@ -28,6 +28,8 @@ inside_traders/
   simulation.py    — Main orchestration loop
   metrics.py       — POLI, EH, Gini, deception rate, trust, compression test
   visualization.py — Matplotlib plot hooks
+  pretrain.py      — Solo-world pretraining (no comm, one agent at a time)
+  checkpoint.py    — Save / load agent learned state (JSON)
 ```
 
 ## HorizonSim v1 Cognitive Architecture
@@ -55,6 +57,73 @@ Each agent carries:
 Beliefs update **only** through evidence. Deception emerges when agents send propositions
 with low-confidence beliefs because the utility of misleading exceeds the utility of truth.
 
+## Intended Workflow (Training Before Testing)
+
+Tests and evaluation must only run **after** a training checkpoint exists.
+The sequence is:
+
+```
+pretrain → load checkpoint → run joint simulation → then run tests
+```
+
+### Step 1 — Solo pretraining (no communication)
+
+Each agent is trained in isolation against the world only:
+- one agent at a time, separate world per agent
+- world observations (prediction cards) only
+- trade and buy-signal actions only (no ventures — require counterparty)
+- individual P&L as the only reward signal
+- no messages sent or received
+
+```bash
+python run_simulation.py --pretrain-only --pretrain-ticks 150
+# writes:  checkpoints/pretrained.json
+```
+
+### Step 2 — Joint simulation with pretrained agents
+
+Load the checkpoint, reset the comm Q-table to a blank slate (so
+communication strategy emerges from scratch), then run the full
+multi-agent simulation with the market, ventures, and comm channel:
+
+```bash
+python run_simulation.py --resume-from checkpoints/pretrained.json
+```
+
+### Step 3 — Run tests / evaluation
+
+```bash
+pytest tests/ -v
+```
+
+Tests verify correctness of code — they are **not** a training loop.
+
+### One-command shortcut (pretrain + joint in sequence)
+
+```bash
+python run_simulation.py --pretrain --pretrain-ticks 150 --ticks 300
+```
+
+### Skip pretraining (original behaviour)
+
+```bash
+python run_simulation.py --skip-pretrain
+python run_simulation.py            # identical — skip-pretrain is the default
+```
+
+### All pretraining CLI flags
+
+| Flag | Description |
+|------|-------------|
+| `--pretrain` | Run solo pretraining, then run joint simulation |
+| `--pretrain-only` | Run solo pretraining, save checkpoint, exit |
+| `--resume-from PATH` | Load checkpoint, run joint simulation (skip pretrain) |
+| `--skip-pretrain` | Skip pretrain, run joint simulation directly |
+| `--pretrain-ticks N` | Solo ticks per agent (default 100) |
+| `--checkpoint-dir DIR` | Directory for checkpoint files (default `checkpoints/`) |
+
+---
+
 ## Quick Start
 
 ```bash
@@ -73,8 +142,11 @@ Options:
 
 ## Running the Test Suite
 
+Run tests only after pretraining is complete:
+
 ```bash
-pytest tests/ -v
+python run_simulation.py --pretrain-only   # train first
+pytest tests/ -v                           # then test
 ```
 
 ## Measuring the Thesis Claims
