@@ -23,7 +23,7 @@ class TickSnapshot:
     gini: float
     total_wealth: float
     venture_success_rate: float
-    deception_rate: float          # fraction of TELLs that were later refuted
+    deception_rate: float          # fraction of TELL actions that used AMPLIFY or INVERT
     mean_trust: float              # average credibility across all pairs
     n_active_ventures: int
     asset_prices: np.ndarray
@@ -44,18 +44,19 @@ class MetricsCollector:
         self.snapshots: List[TickSnapshot] = []
         self._venture_resolved: int = 0
         self._venture_succeeded: int = 0
-        self._tell_count: int = 0
-        self._tell_refuted: int = 0
+        self._tells_total: int = 0
+        self._tells_deceptive: int = 0
 
     def record_venture(self, succeeded: bool) -> None:
         self._venture_resolved += 1
         if succeeded:
             self._venture_succeeded += 1
 
-    def record_tell(self, was_refuted: bool) -> None:
-        self._tell_count += 1
-        if was_refuted:
-            self._tell_refuted += 1
+    def record_tell(self, is_deceptive: bool) -> None:
+        """Record a TELL message. is_deceptive=True when action was AMPLIFY or INVERT."""
+        self._tells_total += 1
+        if is_deceptive:
+            self._tells_deceptive += 1
 
     def snapshot(
         self,
@@ -98,8 +99,8 @@ class MetricsCollector:
                 if self._venture_resolved > 0 else 0.0
             ),
             deception_rate=(
-                self._tell_refuted / self._tell_count
-                if self._tell_count > 0 else 0.0
+                self._tells_deceptive / self._tells_total
+                if self._tells_total > 0 else 0.0
             ),
             mean_trust=mean_trust,
             n_active_ventures=len(active_ventures),

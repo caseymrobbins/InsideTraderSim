@@ -252,6 +252,14 @@ def main() -> None:
     sim.run()
     elapsed = time.perf_counter() - t0
 
+    # Save post-training checkpoint so learned Q-tables and credibility scores
+    # can be loaded for subsequent fine-tuning or analysis runs.
+    from inside_traders.checkpoint import save_checkpoint
+    posttrain_path = os.path.join(args.checkpoint_dir, "posttrain.json")
+    os.makedirs(args.checkpoint_dir, exist_ok=True)
+    save_checkpoint(sim.agents, posttrain_path)
+    print(f"\n  Post-training checkpoint saved to {posttrain_path}")
+
     print_summary(sim)
 
     if not args.no_plots:

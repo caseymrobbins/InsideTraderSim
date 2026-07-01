@@ -96,6 +96,9 @@ class Agent:
         self._prev_reward_signal: float = 0.0
         self._last_comm_state: Optional[Tuple[int, int]] = None
         self._last_comm_action: Optional[int] = None
+        # Delayed Q-updates: key=deadline_tick, value=(s0, s1, a, baseline_reward)
+        # Applied 2 ticks after the comm action so downstream price effects are captured.
+        self._pending_q_updates: Dict[int, Tuple[int, int, int, float]] = {}
         # Outgoing tell tracking for outgoing_accuracy → HI_sus feedback
         self._sent_tells: List[Tuple[str, float, int]] = []
         self._outgoing_confirmed: int = 0
@@ -548,7 +551,7 @@ class Agent:
         # Plain U model: no agency modulation on trading, but comm bias still adapts
         if self.reward_model.name == RewardModelName.U:
             utility = compute_base_utility(self, market_prices)
-            self._update_comm_q(utility)
+            self._update_comm_q(utility, tick)
             return {"trade_scale": 1.0, "venture_scale": 1.0, "info_scale": 1.0}
 
         # Compute agency indices
@@ -572,7 +575,7 @@ class Agent:
 
         utility = compute_base_utility(self, market_prices)
         reward = self.reward_model.compute(utility, agency)
-        self._update_comm_q(reward)
+        self._update_comm_q(reward, tick)
 
         if agency.in_danger_zone:
             # ── Danger zone ────────────────────────────────────────────
@@ -602,24 +605,31 @@ class Agent:
                 "agency": agency,
             }
 
-    def _update_comm_q(self, current_reward: float) -> None:
+    _COMM_Q_DELAY: int = 2  # ticks to wait before applying a comm Q-update
+
+    def _update_comm_q(self, current_reward: float, tick: int = 0) -> None:
         """
         Strategy graph update: adjust weights on (situation, action) pairs.
 
-        Each cell in _comm_q is the weight for one communication strategy
-        in one situation.  The weight of the strategy just used shifts toward
-        the observed reward delta — winning strategies grow heavier, losing
-        ones shrink.  Epsilon controls the mutation rate: early on agents
-        explore freely ('try this'); over time they commit to the highest-
-        weighted strategy in each situation.
+        Uses a 2-tick delayed TD(0) update so the reward signal captures the
+        downstream price impact of the comm action (receiver updates belief →
+        trades → price moves → sender's position value changes) rather than
+        the pre-trade snapshot from the same tick as the action.
         """
-        reward_delta = current_reward - self._prev_reward_signal
+        # Apply any Q-update that is due this tick
+        pending = self._pending_q_updates.pop(tick, None)
+        if pending is not None:
+            s0, s1, a, baseline = pending
+            delayed_delta = current_reward - baseline
+            self._comm_q[s0, s1, a] += 0.1 * (delayed_delta - self._comm_q[s0, s1, a])
+            self._comm_q_visits[s0, s1, a] += 1
+
+        # Schedule Q-update for the action taken THIS tick (fires in DELAY ticks)
         if self._last_comm_state is not None and self._last_comm_action is not None:
             s0, s1 = self._last_comm_state
             a = self._last_comm_action
-            # TD(0): weight ← weight + lr × (observed_delta − current_weight)
-            self._comm_q[s0, s1, a] += 0.1 * (reward_delta - self._comm_q[s0, s1, a])
-            self._comm_q_visits[s0, s1, a] += 1
+            deadline = tick + self._COMM_Q_DELAY
+            self._pending_q_updates[deadline] = (s0, s1, a, self._prev_reward_signal)
 
         # Decay mutation rate only during Phase B (free conflict); frozen in Phase A
         if not self._comm_honest_phase:

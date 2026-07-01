@@ -337,11 +337,19 @@ class Simulation:
                     ]) if msg.proposition_key else 0.0,
                 })
 
+        # ── 3c. Record deception rate: TELL actions that used AMPLIFY/INVERT ─
+        if self.cfg.comm_enabled:
+            for _msg in messages:
+                if _msg.msg_type == MessageType.TELL:
+                    _sender = agent_map.get(_msg.sender)
+                    if _sender is not None:
+                        self.metrics.record_tell(
+                            is_deceptive=_sender._last_comm_action in (1, 2)
+                        )
+
         # ── 4. Evidence resolution + belief updates ───────────────────
         for ag in self.agents:
             ag.resolve_evidence(t, self.world.fundamentals)
-        if self.cfg.comm_enabled:
-            self._update_deception_metrics(messages, agent_map, t)
 
         # ── 5. Compression test ───────────────────────────────────────
         if t == self.cfg.compression_test_start:
@@ -626,24 +634,6 @@ class Simulation:
     # ------------------------------------------------------------------
     # Deception tracking
     # ------------------------------------------------------------------
-
-    def _update_deception_metrics(
-        self, messages: List[Message], agent_map: Dict[str, Agent], tick: int
-    ) -> None:
-        for msg in messages:
-            if msg.msg_type != MessageType.TELL:
-                continue
-            if msg.proposition_key is None or msg.predicted_value is None:
-                continue
-            target_tick = Agent._parse_target_tick(msg.proposition_key)
-            if target_tick is None or target_tick != tick:
-                continue
-            asset_idx = Agent._parse_asset_idx(msg.proposition_key)
-            if asset_idx is None:
-                continue
-            actual = self.world.fundamentals[asset_idx]
-            error_frac = abs(msg.predicted_value - actual) / (abs(actual) + 1e-9)
-            self.metrics.record_tell(was_refuted=error_frac > 0.10)
 
     # ------------------------------------------------------------------
     # Summary helpers
