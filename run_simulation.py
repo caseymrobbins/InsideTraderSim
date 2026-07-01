@@ -2,15 +2,30 @@
 """
 InsideTraderSim — sample run demonstrating emergence and the POLI×EH compression effect.
 
-Usage:
-    python run_simulation.py                   # default 30 agents, 300 ticks
-    python run_simulation.py --agents 50 --ticks 500 --seed 7 --verbose
-    python run_simulation.py --no-plots        # skip matplotlib output
+Intended workflow
+-----------------
+1. Pretrain agents in a solo-world environment (no communication):
+       python run_simulation.py --pretrain-only
+
+2. Load pretrained agents and run the joint multi-agent simulation:
+       python run_simulation.py --resume-from checkpoints/pretrained.json
+
+3. Or do both steps in one command:
+       python run_simulation.py --pretrain
+
+4. Skip pretraining and run the joint sim directly (original behaviour):
+       python run_simulation.py --skip-pretrain
+       python run_simulation.py            # same, --skip-pretrain is the default
+
+Tests / evaluation should only be run after the training stage has completed
+and a checkpoint is available:
+       pytest tests/ -v
 """
 from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 import time
 import numpy as np
@@ -21,7 +36,12 @@ from inside_traders import visualization as viz
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="InsideTraderSim HorizonSim v1")
+    p = argparse.ArgumentParser(
+        description="InsideTraderSim HorizonSim v1",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+    # ── Simulation parameters ──────────────────────────────────────────
     p.add_argument("--agents", type=int, default=30)
     p.add_argument("--ticks", type=int, default=300)
     p.add_argument("--seed", type=int, default=42)
@@ -40,8 +60,54 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no-plots", action="store_true")
     p.add_argument("--gini-target", type=float, default=None,
                    help="If set, print PASS/FAIL if final Gini exceeds this value")
-    return p.parse_args()
 
+    # ── Pretraining workflow ───────────────────────────────────────────
+    train_group = p.add_mutually_exclusive_group()
+    train_group.add_argument(
+        "--pretrain",
+        action="store_true",
+        help=(
+            "Run solo-world pretraining first, then load the pretrained "
+            "agents and run the joint multi-agent simulation."
+        ),
+    )
+    train_group.add_argument(
+        "--pretrain-only",
+        action="store_true",
+        help=(
+            "Run solo-world pretraining, save the checkpoint, then exit "
+            "without running the joint simulation."
+        ),
+    )
+    train_group.add_argument(
+        "--resume-from",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Load a previously saved checkpoint and run the joint "
+            "simulation using pretrained agent state.  Skips pretraining."
+        ),
+    )
+    train_group.add_argument(
+        "--skip-pretrain",
+        action="store_true",
+        help="Skip pretraining and run the joint simulation directly (default behaviour).",
+    )
+
+    p.add_argument(
+        "--pretrain-ticks",
+        type=int,
+        default=100,
+        help="Number of solo ticks per agent during pretraining (default 100).",
+    )
+    p.add_argument(
+        "--checkpoint-dir",
+        type=str,
+        default="checkpoints",
+        help="Directory for checkpoint files (default: checkpoints/).",
+    )
+
+    return p.parse_args()
 
 
 def print_summary(sim: Simulation) -> None:
@@ -65,7 +131,6 @@ def print_summary(sim: Simulation) -> None:
     print(f"  Mean trust          : {final.mean_trust:.3f}")
     print(f"  POLI×EH correlation : {m.poli_eh_correlation():.4f}")
 
-    # Top 5 agents
     order = np.argsort(final.wealth)[::-1]
     print("\n  Top 5 agents by wealth:")
     print(f"  {'Agent':12s} {'Wealth':>10s} {'POLI':>8s} {'EH':>8s} {'POLI×EH':>10s}")
@@ -74,7 +139,6 @@ def print_summary(sim: Simulation) -> None:
         print(f"  {final.agent_ids[i]:12s} {final.wealth[i]:>10.1f} "
               f"{final.poli[i]:>8.1f} {final.eh[i]:>8.3f} {final.poli_eh[i]:>10.1f}")
 
-    # Compression test
     if sim._compression_targets:
         print("\n  Compression Test Results:")
         results = sim.compression_test_summary()
@@ -84,6 +148,10 @@ def print_summary(sim: Simulation) -> None:
                   f"post_growth={r['post_growth']:>+8.1f}  [{status}]")
 
     print("=" * 60)
+
+
+def _checkpoint_path(checkpoint_dir: str) -> str:
+    return os.path.join(checkpoint_dir, "pretrained.json")
 
 
 def main() -> None:
@@ -109,8 +177,49 @@ def main() -> None:
         verbose=args.verbose,
     )
 
+    ckpt_path = _checkpoint_path(args.checkpoint_dir)
+
+    # ------------------------------------------------------------------
+    # Step 1: Pretraining (if requested)
+    # ------------------------------------------------------------------
+    pretrained_state = None  # list[dict] | None
+
+    if args.pretrain or args.pretrain_only:
+        from inside_traders.pretrain import PretrainConfig, run_solo_pretrain
+        pretrain_cfg = PretrainConfig(
+            n_ticks=args.pretrain_ticks,
+            checkpoint_path=ckpt_path,
+            plot_dir=args.plot_dir,
+            verbose=args.verbose,
+        )
+        run_solo_pretrain(cfg, pretrain_cfg)
+
+        if args.pretrain_only:
+            print(f"\n  Checkpoint saved to {ckpt_path}")
+            print("  Run the joint simulation with:")
+            print(f"    python run_simulation.py --resume-from {ckpt_path}\n")
+            return
+
+        # Load the freshly written checkpoint for the joint phase
+        from inside_traders.checkpoint import load_checkpoint
+        pretrained_state = load_checkpoint(ckpt_path)
+
+    elif args.resume_from:
+        from inside_traders.checkpoint import load_checkpoint
+        pretrained_state = load_checkpoint(args.resume_from)
+        print(f"\n  Loaded pretrained checkpoint from {args.resume_from}")
+
+    # ------------------------------------------------------------------
+    # Step 2: Joint multi-agent simulation
+    # ------------------------------------------------------------------
     t0 = time.perf_counter()
     sim = Simulation(cfg)
+
+    if pretrained_state is not None:
+        from inside_traders.checkpoint import apply_checkpoint
+        apply_checkpoint(sim.agents, pretrained_state, reset_comm=True)
+        print("  Applied pretrained state (comm Q-table reset for joint phase)\n")
+
     sim.run()
     elapsed = time.perf_counter() - t0
 

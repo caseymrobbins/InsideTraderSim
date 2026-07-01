@@ -87,5 +87,8 @@ class SimConfig:
     exp_compressed_card_noise: float = 0.45     # high noise on prediction cards (degrades EH)
     exp_compressed_network_degree: int = 1      # near-isolation in comm graph
 
+    # ---- Communication toggle (set False for no-comm pretraining via Simulation) ----
+    comm_enabled: bool = True          # when False, skip all message exchange each tick
+
     # ---- Preference vector weights (names only; values randomised per agent) ----
     preference_dimensions: tuple = ("wealth", "influence", "security", "knowledge", "autonomy")

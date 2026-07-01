@@ -237,3 +237,144 @@ def test_gini_positive_under_heterogeneous_wealth():
     sim.run()
     final_gini = sim.metrics.snapshots[-1].gini if sim.metrics.snapshots else 0.0
     assert final_gini > 0.0, "Heterogeneous agents should produce nonzero Gini"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Pretraining: solo-world phase
+# ──────────────────────────────────────────────────────────────────────
+
+def test_pretrain_produces_no_comm_evidence():
+    """Solo pretraining must not inject any COMMUNICATION evidence."""
+    from inside_traders.pretrain import PretrainConfig, run_solo_pretrain
+    from inside_traders.evidence import EvidenceType
+    import tempfile, os
+
+    cfg = SimConfig(n_agents=4, n_assets=3, seed=0)
+    with tempfile.TemporaryDirectory() as tmp:
+        pcfg = PretrainConfig(n_ticks=20, checkpoint_path=os.path.join(tmp, "ckpt.json"))
+        agents = run_solo_pretrain(cfg, pcfg)
+
+    for ag in agents:
+        comm_ev = [ev for ev in ag.evidence_ledger if ev.ev_type == EvidenceType.COMMUNICATION]
+        assert comm_ev == [], (
+            f"{ag.agent_id} has {len(comm_ev)} COMMUNICATION evidence entries "
+            "after solo pretraining — communication channel was not properly isolated."
+        )
+
+
+def test_checkpoint_save_and_load():
+    """save_checkpoint / load_checkpoint must be inverses for all serialised fields."""
+    from inside_traders.checkpoint import save_checkpoint, load_checkpoint
+    import tempfile, os
+
+    cfg = SimConfig(n_agents=3, n_assets=2, seed=7)
+    rng = np.random.default_rng(7)
+    agents = [
+        Agent(f"agent_{i}", cfg, np.random.default_rng(i), initial_cash=100.0)
+        for i in range(3)
+    ]
+    # Modify Q-table so there is non-trivial state to round-trip.
+    agents[0]._comm_q[0, 0, 1] = 0.42
+    agents[1]._comm_epsilon = 0.25
+    agents[2].preference_vector["wealth"] = 0.99
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "ckpt.json")
+        save_checkpoint(agents, path)
+        state_dicts = load_checkpoint(path)
+
+    assert len(state_dicts) == 3
+    assert abs(state_dicts[0]["comm_q"][0][0][1] - 0.42) < 1e-9
+    assert abs(state_dicts[1]["comm_epsilon"] - 0.25) < 1e-9
+    assert abs(state_dicts[2]["preference_vector"]["wealth"] - 0.99) < 1e-9
+
+
+def test_apply_checkpoint_restores_state_and_resets_comm():
+    """apply_checkpoint must transfer learned state and blank the comm Q-table."""
+    from inside_traders.checkpoint import save_checkpoint, load_checkpoint, apply_checkpoint
+    import tempfile, os
+
+    cfg = SimConfig(n_agents=3, n_assets=2, seed=8)
+    src_agents = [
+        Agent(f"agent_{i}", cfg, np.random.default_rng(i + 100), initial_cash=100.0)
+        for i in range(3)
+    ]
+    # Write non-trivial Q-table values and a credibility score.
+    src_agents[0]._comm_q[1, 2, 3] = -0.7
+    src_agents[0].epistemic_model.update("self", "price", was_correct=True, rate=0.3)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "ckpt.json")
+        save_checkpoint(src_agents, path)
+        state_dicts = load_checkpoint(path)
+
+    # Fresh target agents (simulating a new Simulation object).
+    tgt_agents = [
+        Agent(f"agent_{i}", cfg, np.random.default_rng(i + 200), initial_cash=200.0)
+        for i in range(3)
+    ]
+    apply_checkpoint(tgt_agents, state_dicts, reset_comm=True)
+
+    # Credibility transferred.
+    assert tgt_agents[0].epistemic_model.get("self", "price") > 0.5
+    # Q-table reset to blank slate despite checkpoint containing non-zero values.
+    assert tgt_agents[0]._comm_q.sum() == 0.0
+    assert tgt_agents[0]._comm_epsilon == 0.5
+
+
+def test_joint_sim_uses_pretrained_epistemic_state():
+    """
+    After apply_checkpoint, the joint simulation should start with the
+    pretrained epistemic credibility rather than the cold default of 0.5.
+    """
+    from inside_traders.pretrain import PretrainConfig, run_solo_pretrain
+    from inside_traders.checkpoint import save_checkpoint, load_checkpoint, apply_checkpoint
+    import tempfile, os
+
+    cfg = SimConfig(n_agents=4, n_assets=3, n_ticks=20, seed=5,
+                    compression_test_start=200)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        pcfg = PretrainConfig(n_ticks=30, checkpoint_path=os.path.join(tmp, "ckpt.json"))
+        run_solo_pretrain(cfg, pcfg)
+        state_dicts = load_checkpoint(pcfg.checkpoint_path)
+
+    # Build a fresh simulation (the joint phase).
+    sim = Simulation(cfg)
+    apply_checkpoint(sim.agents, state_dicts, reset_comm=True)
+
+    # At least some agents should have self-credibility updated away from 0.5.
+    self_credibilities = [
+        ag.epistemic_model.get("self", "price", default=0.5)
+        for ag in sim.agents
+    ]
+    # After 30 ticks of evidence resolution, at least one agent's credibility
+    # should differ from the cold-start default of 0.5.
+    assert any(abs(c - 0.5) > 0.01 for c in self_credibilities), (
+        "No agent has non-default self-credibility after pretraining — "
+        "checkpoint transfer may not be working."
+    )
+
+    # The joint simulation must still run without error.
+    sim.run()
+    assert len(sim.metrics.snapshots) > 0
+
+
+def test_simulation_comm_disabled_has_no_comm_evidence():
+    """When comm_enabled=False, the Simulation must not produce COMMUNICATION evidence."""
+    from inside_traders.evidence import EvidenceType
+
+    cfg = SimConfig(
+        n_agents=5, n_assets=3, n_ticks=15, seed=3,
+        comm_enabled=False,
+        compression_test_start=200,
+    )
+    sim = Simulation(cfg)
+    sim.run()
+
+    for ag in sim.agents:
+        comm_ev = [ev for ev in ag.evidence_ledger if ev.ev_type == EvidenceType.COMMUNICATION]
+        assert comm_ev == [], (
+            f"{ag.agent_id} has {len(comm_ev)} COMMUNICATION evidence entries "
+            "even though comm_enabled=False."
+        )
