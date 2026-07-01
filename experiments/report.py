@@ -103,35 +103,34 @@ def build_report(
     # Compression analysis
     lines.append("## Compression Test Analysis\n")
     comp = compression_analysis(results)
-    lines.append("| Model | Compressed EH | Wealth Ratio | Danger-Zone Ticks |")
-    lines.append("|-------|--------------|--------------|-------------------|")
-    for m in REWARD_MODELS:
-        if m not in comp:
-            continue
-        c = comp[m]
-        lines.append(
-            f"| **{m}** | {c['mean_compressed_eh']:.4f} | "
-            f"{c['compressed_wealth_ratio']:.3f} | "
-            f"{c['mean_danger_zone_ticks']:.1f} |"
-        )
-    lines.append("")
+    comp_models = [m for m in REWARD_MODELS if m in comp]
+    if comp_models:
+        lines.append("| Model | Compressed EH | Wealth Ratio | Danger-Zone Ticks |")
+        lines.append("|-------|--------------|--------------|-------------------|")
+        for m in comp_models:
+            c = comp[m]
+            lines.append(
+                f"| **{m}** | {c['mean_compressed_eh']:.4f} | "
+                f"{c['compressed_wealth_ratio']:.3f} | "
+                f"{c['mean_danger_zone_ticks']:.1f} |"
+            )
+        lines.append("")
 
-    # Interpretation
-    best_eh = max((m for m in REWARD_MODELS if m in comp),
-                  key=lambda m: comp[m]["mean_compressed_eh"])
-    worst_ratio = max((m for m in REWARD_MODELS if m in comp),
-                      key=lambda m: comp[m]["compressed_wealth_ratio"])
-    lines.append("### Interpretation\n")
-    lines.append(
-        f"- **{best_eh}** yields the highest epistemic health among compressed agents, "
-        f"suggesting it best counters EH degradation."
-    )
-    lines.append(
-        f"- **{worst_ratio}** produces the highest compressed/non-compressed wealth ratio "
-        f"({comp[worst_ratio]['compressed_wealth_ratio']:.3f}), "
-        f"indicating more extractive dynamics under this model."
-    )
-    lines.append("")
+        best_eh = max(comp_models, key=lambda m: comp[m]["mean_compressed_eh"])
+        worst_ratio = max(comp_models, key=lambda m: comp[m]["compressed_wealth_ratio"])
+        lines.append("### Interpretation\n")
+        lines.append(
+            f"- **{best_eh}** yields the highest epistemic health among compressed agents, "
+            f"suggesting it best counters EH degradation."
+        )
+        lines.append(
+            f"- **{worst_ratio}** produces the highest compressed/non-compressed wealth ratio "
+            f"({comp[worst_ratio]['compressed_wealth_ratio']:.3f}), "
+            f"indicating more extractive dynamics under this model."
+        )
+        lines.append("")
+    else:
+        lines.append("_No compression data available for this result set._\n")
 
     # Mixed-model test
     if mixed_results:
@@ -149,20 +148,24 @@ def build_report(
         lines.append("")
 
     # Full metric table (appendix)
-    lines.append("## Appendix: Full Metric Table (all scenarios combined)\n")
-    all_stats = compute_trial_stats(results)
-    all_models = [m for m in REWARD_MODELS if m in all_stats]
-    header = "| Model | " + " | ".join(_METRIC_LABELS.get(f, f) for f in _KEY_METRICS) + " |"
-    sep = "|-------|" + "|".join(["---"] * len(_KEY_METRICS)) + "|"
-    lines.append(header)
-    lines.append(sep)
-    for m in all_models:
-        row = f"| **{m}** |"
-        for f in _KEY_METRICS:
-            v = all_stats[m][f]["mean"]
-            row += f" {v:.4f} |"
-        lines.append(row)
-    lines.append("")
+    if results:
+        lines.append("## Appendix: Full Metric Table (all scenarios combined)\n")
+        all_stats = compute_trial_stats(results)
+        all_models = [m for m in REWARD_MODELS if m in all_stats]
+        # Also include any model not in REWARD_MODELS (e.g. single-model reports)
+        extra = [m for m in all_stats if m not in REWARD_MODELS]
+        all_models = all_models + extra
+        header = "| Model | " + " | ".join(_METRIC_LABELS.get(f, f) for f in _KEY_METRICS) + " |"
+        sep = "|-------|" + "|".join(["---"] * len(_KEY_METRICS)) + "|"
+        lines.append(header)
+        lines.append(sep)
+        for m in all_models:
+            row = f"| **{m}** |"
+            for f in _KEY_METRICS:
+                v = all_stats[m][f]["mean"]
+                row += f" {v:.4f} |"
+            lines.append(row)
+        lines.append("")
 
     report_text = "\n".join(lines)
     path = os.path.join(output_dir, "report.md")

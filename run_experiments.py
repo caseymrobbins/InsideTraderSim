@@ -93,11 +93,42 @@ def main() -> None:
     print(f"  Completed {len(results)} trials in {elapsed:.1f}s")
     print(f"{'='*60}\n")
 
-    # Save raw results as JSON
-    raw_path = os.path.join(args.output_dir, "results.json")
-    with open(raw_path, "w") as fh:
+    # ------------------------------------------------------------------
+    # Save data: combined at top level, per-model in subdirectories
+    # ------------------------------------------------------------------
+
+    # Combined raw results (all models + mixed)
+    combined_path = os.path.join(args.output_dir, "results.json")
+    with open(combined_path, "w") as fh:
         json.dump([asdict(r) for r in results + runner.mixed_results], fh, indent=2)
-    print(f"  Raw results: {raw_path}")
+    print(f"  Combined results: {combined_path}")
+
+    # Per-model directories: {output_dir}/{model}/results.json + report + plots
+    for model in exp.reward_models:
+        model_results = [r for r in results if r.reward_model == model]
+        if not model_results:
+            continue
+        model_dir = os.path.join(args.output_dir, model)
+        os.makedirs(model_dir, exist_ok=True)
+
+        model_path = os.path.join(model_dir, "results.json")
+        with open(model_path, "w") as fh:
+            json.dump([asdict(r) for r in model_results], fh, indent=2)
+
+        model_report = build_report(model_results, [], model_dir)
+        plot_all(model_results, [], model_dir)
+        print(f"  {model:5s}  → {model_dir}/  ({len(model_results)} trials)")
+
+    # MIXED data gets its own directory if present
+    if runner.mixed_results:
+        mixed_dir = os.path.join(args.output_dir, "MIXED")
+        os.makedirs(mixed_dir, exist_ok=True)
+        with open(os.path.join(mixed_dir, "results.json"), "w") as fh:
+            json.dump([asdict(r) for r in runner.mixed_results], fh, indent=2)
+        build_report([], runner.mixed_results, mixed_dir)
+        print(f"  {'MIXED':5s}  → {mixed_dir}/  ({len(runner.mixed_results)} trials)")
+
+    print()
 
     # Print quick summary to console
     all_stats = compute_trial_stats(results)
@@ -147,16 +178,17 @@ def main() -> None:
         )
     print()
 
-    # Generate plots
-    print("  Generating plots...")
+    # Combined comparison plots (require all models together)
+    print("  Generating combined comparison plots...")
     plot_all(results, runner.mixed_results, args.output_dir)
 
-    # Generate report
-    print("  Generating Markdown report...")
+    # Combined report
+    print("  Generating combined Markdown report...")
     report_path = build_report(results, runner.mixed_results, args.output_dir)
 
-    print(f"\n  Done. Results in {args.output_dir}/")
-    print(f"  Report: {report_path}\n")
+    print(f"\n  Done.")
+    print(f"  Per-model data : {args.output_dir}/{{U,UF,UH,UHF,UHFS}}/")
+    print(f"  Combined report: {report_path}\n")
 
 
 if __name__ == "__main__":

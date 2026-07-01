@@ -119,9 +119,11 @@ credibility += credibility_update_rate × (was_correct − credibility)
 Where `was_correct ∈ {1.0, 0.0}`. This is a simple exponential moving average
 — accurate sources gain credibility, deceptive sources lose it.
 
-### 4. Reward Models
+### 4. Reward Models (Objective Functions)
 
-Five reward model variants control how `current_reward` is computed for comm Q-learning:
+Five reward model variants control how `current_reward` is computed for comm Q-learning.
+**Each model is trained independently** — its checkpoints and plots are stored in their
+own subdirectory so runs never overwrite each other.
 
 | Name | Formula | When to Use |
 |------|---------|-------------|
@@ -131,7 +133,23 @@ Five reward model variants control how `current_reward` is computed for comm Q-l
 | **UHF** | UH × FHI | Full agency-aware trading |
 | **UHFS** | Safe-zone variant; caps trade scale when agency is low | Safest; use for POLI/EH analysis |
 
-Select with `--reward-model U` (default `U`).
+Select with `--reward-model <NAME>` (default `U`).
+
+#### Per-model output layout
+
+```
+checkpoints/
+  U/          ← pretrained.json, posttrain.json for model U
+  UF/         ← pretrained.json, posttrain.json for model UF
+  UH/
+  UHF/
+  UHFS/
+
+plots/
+  U/          ← mid-run dashboards and pretrain summary for model U
+  UF/
+  …
+```
 
 ---
 
@@ -163,8 +181,13 @@ Each agent trains alone against the world. No other agents, no communication.
 **What is NOT saved**: economic state (cash, positions, market impact) — each agent starts the joint phase on equal footing.
 
 ```bash
-python run_simulation.py --pretrain-only --pretrain-ticks 150
-# writes:  checkpoints/pretrained.json
+# Default model is U; checkpoints go to checkpoints/U/
+python run_simulation.py --pretrain-only --pretrain-ticks 150 --reward-model U
+# writes:  checkpoints/U/pretrained.json
+
+# Train a separate model for UHFS
+python run_simulation.py --pretrain-only --pretrain-ticks 150 --reward-model UHFS
+# writes:  checkpoints/UHFS/pretrained.json
 ```
 
 ### Phase A — Curriculum: Honest Signaling
@@ -194,19 +217,28 @@ After the transition, the full action space is available: TRUTHFUL, AMPLIFY, INV
 
 ## Intended Workflow
 
+Each objective function (reward model) is trained independently. Checkpoints and
+plots are stored under `checkpoints/{model}/` and `plots/{model}/` so runs never
+overwrite each other.
+
 ```bash
-# Step 1: Solo pretraining (save checkpoint)
-python run_simulation.py --pretrain-only --pretrain-ticks 150
+# Step 1: Solo pretraining — one run per objective function
+python run_simulation.py --pretrain-only --pretrain-ticks 150 --reward-model U
+python run_simulation.py --pretrain-only --pretrain-ticks 150 --reward-model UF
+python run_simulation.py --pretrain-only --pretrain-ticks 150 --reward-model UH
+python run_simulation.py --pretrain-only --pretrain-ticks 150 --reward-model UHF
+python run_simulation.py --pretrain-only --pretrain-ticks 150 --reward-model UHFS
 
-# Step 2: Joint simulation — load checkpoint + curriculum
-python run_simulation.py --resume-from checkpoints/pretrained.json \
+# Step 2: Joint simulation — load checkpoint + curriculum (per model)
+python run_simulation.py --reward-model UHFS \
+    --resume-from checkpoints/UHFS/pretrained.json \
     --curriculum-honest-ticks 150 --ticks 300
 
-# Or do both in one command:
-python run_simulation.py --pretrain --pretrain-ticks 150 \
+# Or do both steps in one command:
+python run_simulation.py --reward-model UHFS --pretrain --pretrain-ticks 150 \
     --curriculum-honest-ticks 150 --ticks 300
 
-# Step 3: Run tests (only after training is complete)
+# Step 3: Run tests (only after at least one model has been trained)
 pytest tests/ -v
 ```
 
@@ -239,6 +271,7 @@ python run_simulation.py
 | `--seed N` | 42 | RNG seed |
 | `--assets N` | 5 | Number of tradeable assets |
 | `--ventures N` | 4 | Max concurrent ventures |
+| `--reward-model NAME` | `U` | Objective function: `U`, `UF`, `UH`, `UHF`, or `UHFS` |
 | `--device cpu\|cuda` | cpu | Compute device |
 | `--verbose` | off | Per-tick debug logs |
 | `--no-plots` | off | Skip matplotlib output |
@@ -253,7 +286,7 @@ python run_simulation.py
 | `--resume-from PATH` | — | Load checkpoint, run joint simulation |
 | `--skip-pretrain` | (default) | Skip pretrain, run joint simulation directly |
 | `--pretrain-ticks N` | 100 | Solo ticks per agent |
-| `--checkpoint-dir DIR` | `checkpoints/` | Checkpoint directory |
+| `--checkpoint-dir DIR` | `checkpoints/` | Base checkpoint directory; model subdirectory appended automatically |
 
 ### Curriculum
 
@@ -331,7 +364,7 @@ inside_traders/
 ## Output Plots
 
 Every `--plot-interval` ticks (default 50), a 12-panel dashboard is saved to
-`plots/dashboard_tick_NNNN.png`:
+`plots/{model}/dashboard_tick_NNNN.png` (namespaced by reward model):
 
 | Panel | Contents |
 |-------|----------|
@@ -366,6 +399,41 @@ The test suite (27 tests) covers: world dynamics, belief updates, evidence resol
 order book matching, venture lifecycle, Gini calculation, full simulation runs,
 pretraining isolation, checkpoint round-trip, curriculum TRUTHFUL enforcement,
 and epsilon reset at Phase B.
+
+---
+
+## Experiment Runner
+
+`run_experiments.py` runs all five reward models across scenarios and saves data
+at two levels:
+
+```
+experiment_results/
+  results.json          ← combined raw results (all models + MIXED)
+  report.md             ← cross-model comparison report
+  model_comparison*.png ← comparative box plots
+  heatmap_*.png
+  compression_effect.png
+  mixed_vs_pure.png
+  U/
+    results.json        ← raw trial data for model U only
+    report.md           ← per-model report
+    model_comparison*.png
+    …
+  UF/
+    results.json
+    …
+  UH/ UHF/ UHFS/        ← same structure
+  MIXED/
+    results.json        ← mixed-model trial data
+    report.md
+```
+
+```bash
+python run_experiments.py                          # all 5 models × 2 scenarios × 10 trials
+python run_experiments.py --models UHFS UH --trials 5   # subset
+python run_experiments.py --output-dir my_results  # custom output dir
+```
 
 ---
 
