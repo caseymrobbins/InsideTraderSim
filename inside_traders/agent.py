@@ -92,6 +92,7 @@ class Agent:
         self._comm_q: np.ndarray = np.zeros((3, 3, 5))
         self._comm_q_visits: np.ndarray = np.zeros((3, 3, 5), dtype=np.int64)
         self._comm_epsilon: float = 0.5        # exploration rate, decays each tick
+        self._comm_honest_phase: bool = False   # set by Simulation during curriculum Phase A
         self._prev_reward_signal: float = 0.0
         self._last_comm_state: Optional[Tuple[int, int]] = None
         self._last_comm_action: Optional[int] = None
@@ -196,7 +197,10 @@ class Agent:
         # ── Epsilon-greedy action selection ───────────────────────────────
         # 0=TRUTHFUL  1=AMPLIFY  2=INVERT  3=SILENT  4=OFFER
         # No action has a label — the agent discovers what each one does.
-        if self.rng.random() < self._comm_epsilon:
+        if self._comm_honest_phase:
+            # Curriculum Phase A: only TRUTHFUL allowed; epsilon frozen
+            action = 0
+        elif self.rng.random() < self._comm_epsilon:
             action = int(self.rng.integers(0, 5))
         else:
             action = int(np.argmax(self._comm_q[state[0], state[1]]))
@@ -603,8 +607,9 @@ class Agent:
             self._comm_q[s0, s1, a] += 0.1 * (reward_delta - self._comm_q[s0, s1, a])
             self._comm_q_visits[s0, s1, a] += 1
 
-        # Decay mutation rate: early exploration gives way to exploitation
-        self._comm_epsilon = max(0.05, self._comm_epsilon * 0.995)
+        # Decay mutation rate only during Phase B (free conflict); frozen in Phase A
+        if not self._comm_honest_phase:
+            self._comm_epsilon = max(0.05, self._comm_epsilon * 0.995)
         self._prev_reward_signal = current_reward
 
     # ------------------------------------------------------------------

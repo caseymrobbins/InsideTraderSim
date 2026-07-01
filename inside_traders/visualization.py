@@ -535,6 +535,15 @@ def plot_midrun_dashboard(sim: "Simulation", tick: int, plot_dir: str = "plots")
     ticks_x = [s.tick for s in snaps]
     final = snaps[-1]
     compressed_ids = set(sim._compression_targets)
+    cht = sim.cfg.curriculum_honest_ticks  # 0 = disabled
+
+    def _add_curriculum_vline(ax_target, label: bool = True) -> None:
+        """Overlay Phase A/B boundary if curriculum is active."""
+        if cht > 0:
+            ax_target.axvline(
+                cht, color="darkorchid", linestyle="--", linewidth=1.2,
+                alpha=0.75, label="A→B" if label else None,
+            )
 
     # ── [0,0] Wealth histogram ──────────────────────────────────────────
     ax = fig.add_subplot(gs[0, 0])
@@ -552,9 +561,12 @@ def plot_midrun_dashboard(sim: "Simulation", tick: int, plot_dir: str = "plots")
     # ── [0,1] Gini over time ────────────────────────────────────────────
     ax = fig.add_subplot(gs[0, 1])
     ax.plot(ticks_x, [s.gini for s in snaps], color="crimson", linewidth=1.5)
+    _add_curriculum_vline(ax)
     if sim.cfg.compression_test_start <= tick:
         ax.axvline(sim.cfg.compression_test_start, color="black",
                    linestyle=":", linewidth=1, alpha=0.6, label="compression")
+    handles, _ = ax.get_legend_handles_labels()
+    if handles:
         ax.legend(fontsize=8)
     ax.set_title("Gini Coefficient Over Time", fontsize=10)
     ax.set_xlabel("Tick")
@@ -566,6 +578,10 @@ def plot_midrun_dashboard(sim: "Simulation", tick: int, plot_dir: str = "plots")
     ax = fig.add_subplot(gs[0, 2])
     total_w = [s.total_wealth for s in snaps]
     ax.plot(ticks_x, total_w, color="seagreen", linewidth=1.5)
+    _add_curriculum_vline(ax)
+    handles, _ = ax.get_legend_handles_labels()
+    if handles:
+        ax.legend(fontsize=8)
     growth = 100 * (total_w[-1] / total_w[0] - 1) if total_w[0] > 0 else 0.0
     ax.set_title(f"Total Wealth  ({growth:+.1f}% from tick {snaps[0].tick})", fontsize=10)
     ax.set_xlabel("Tick")
@@ -610,9 +626,12 @@ def plot_midrun_dashboard(sim: "Simulation", tick: int, plot_dir: str = "plots")
     corrs = _poli_eh_corr_series(snaps)
     ax.plot(ticks_x, corrs, color="purple", linewidth=1.5)
     ax.axhline(0, color="k", linewidth=0.8, linestyle="--", alpha=0.4)
+    _add_curriculum_vline(ax)
     if sim.cfg.compression_test_start <= tick:
         ax.axvline(sim.cfg.compression_test_start, color="red",
                    linestyle=":", linewidth=1, alpha=0.6, label="compression")
+    handles, _ = ax.get_legend_handles_labels()
+    if handles:
         ax.legend(fontsize=8)
     ax.set_title("POLI×EH Correlation  r(t)", fontsize=10)
     ax.set_xlabel("Tick")
@@ -628,12 +647,18 @@ def plot_midrun_dashboard(sim: "Simulation", tick: int, plot_dir: str = "plots")
     decept_line, = ax2.plot(ticks_x, [s.deception_rate for s in snaps],
                              color="firebrick", linewidth=1.2, linestyle="--",
                              label="deception rate")
+    _add_curriculum_vline(ax, label=False)
+    curriculum_proxy = (
+        [plt.Line2D([0], [0], color="darkorchid", linestyle="--", lw=1.2, label="A→B")]
+        if cht > 0 else []
+    )
     ax.set_title("Trust & Deception", fontsize=10)
     ax.set_xlabel("Tick")
     ax.set_ylabel("Mean trust", color="teal")
     ax2.set_ylabel("Deception rate", color="firebrick")
-    ax.legend([trust_line, decept_line],
-              [trust_line.get_label(), decept_line.get_label()],
+    ax.legend([trust_line, decept_line] + curriculum_proxy,
+              [trust_line.get_label(), decept_line.get_label()]
+              + (["A→B"] if cht > 0 else []),
               fontsize=8, loc="lower right")
     ax.grid(alpha=0.2)
 
@@ -678,6 +703,7 @@ def plot_midrun_dashboard(sim: "Simulation", tick: int, plot_dir: str = "plots")
     q_labels = ["Bottom 20%", "Q2", "Q3", "Q4", "Top 20%"]
     q_colors = ["#d62728", "#ff7f0e", "#2ca02c", "#1f77b4", "#9467bd"]
     ax.stackplot(ticks_x, shares.T, labels=q_labels, colors=q_colors, alpha=0.75)
+    _add_curriculum_vline(ax, label=True)
     ax.set_title("Wealth Shares by Quintile", fontsize=10)
     ax.set_xlabel("Tick")
     ax.set_ylabel("Wealth share")

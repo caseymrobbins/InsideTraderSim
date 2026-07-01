@@ -90,5 +90,11 @@ class SimConfig:
     # ---- Communication toggle (set False for no-comm pretraining via Simulation) ----
     comm_enabled: bool = True          # when False, skip all message exchange each tick
 
+    # ---- Curriculum: honest-phase then conflict ----
+    # Agents are restricted to TRUTHFUL-only comms for the first
+    # curriculum_honest_ticks ticks; full action space (incl. AMPLIFY/INVERT)
+    # unlocks at tick curriculum_honest_ticks + 1.  Set to 0 to disable.
+    curriculum_honest_ticks: int = 0
+
     # ---- Preference vector weights (names only; values randomised per agent) ----
     preference_dimensions: tuple = ("wealth", "influence", "security", "knowledge", "autonomy")

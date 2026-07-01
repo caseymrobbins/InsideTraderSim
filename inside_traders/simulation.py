@@ -200,6 +200,21 @@ class Simulation:
     def _step(self) -> None:
         t = self.tick
 
+        # ── 0. Curriculum phase management ───────────────────────────
+        cht = self.cfg.curriculum_honest_ticks
+        in_honest_phase = (cht > 0) and (t <= cht)
+        for ag in self.agents:
+            ag._comm_honest_phase = in_honest_phase
+        if cht > 0 and t == cht + 1:
+            # Phase B unlocks: reset epsilon so agents can explore full action space
+            for ag in self.agents:
+                ag._comm_epsilon = 0.5
+            print(
+                f"\n  {_Y}[CURRICULUM]{_RS} tick {t}: Phase A → Phase B  "
+                f"(conflict unlocked, epsilon reset to 0.5)\n",
+                flush=True,
+            )
+
         # ── 1. Hidden states evolve (on device) ──────────────────────
         self.world.step()
         self.order_book.reset_tick_volume()
@@ -332,6 +347,8 @@ class Simulation:
         compression_flag = (
             f" {_R}[COMPRESS]{_RS}" if t >= self.cfg.compression_test_start else ""
         )
+        cht = self.cfg.curriculum_honest_ticks
+        curriculum_flag = f" {_Y}[HONEST]{_RS}" if (cht > 0 and t <= cht) else ""
 
         # Build the status line (includes mean EH for epistemic health tracking)
         mean_eh = float(np.mean(snap.eh)) if len(snap.eh) > 0 else 0.0
@@ -352,6 +369,7 @@ class Simulation:
             f" │ {avg_tick_ms:.1f}ms/tk"
             f" │ ETA={eta:.0f}s"
             f"{compression_flag}"
+            f"{curriculum_flag}"
             f"  {bar}",
             flush=True,
         )
