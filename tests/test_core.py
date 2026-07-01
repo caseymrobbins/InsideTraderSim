@@ -475,3 +475,92 @@ def test_curriculum_epsilon_resets_at_phase_b():
         )
         # Also confirm epsilon is closer to 0.5 than to floor (0.05), proving the reset
         assert eps > 0.4, f"Epsilon {eps} too low — reset may not have fired"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Deception emergence tests
+# ──────────────────────────────────────────────────────────────────────
+
+def test_phase_a_deception_rate_is_zero():
+    """
+    Curriculum Phase A forces every TELL to be TRUTHFUL.
+    deception_rate must be exactly 0.0 when all ticks are Phase A.
+    """
+    cfg = SimConfig(
+        n_agents=6, n_assets=3, n_ticks=15, seed=42,
+        curriculum_honest_ticks=200,   # all 15 ticks fall inside Phase A
+        comm_enabled=True,
+        log_interval=15, status_interval=15,
+        compression_test_start=200,
+    )
+    sim = Simulation(cfg)
+    sim.run()
+    final = sim.metrics.snapshots[-1]
+    assert final.deception_rate == 0.0, (
+        f"Phase A should produce zero deception; got {final.deception_rate:.3f}"
+    )
+
+
+def test_deception_rate_positive_in_phase_b():
+    """
+    Once Phase B unlocks (curriculum_honest_ticks exhausted), agents explore
+    AMPLIFY and INVERT via epsilon-greedy, so deception_rate must become > 0.
+
+    With epsilon=0.5 at the Phase B start and a weighted explore distribution
+    giving ~23% each to AMPLIFY/INVERT, roughly 30–40% of TELL messages will
+    be deceptive from random exploration alone.
+    """
+    cfg = SimConfig(
+        n_agents=6, n_assets=3, n_ticks=60, seed=42,
+        curriculum_honest_ticks=10,   # Phase A: ticks 1–10, Phase B: ticks 11–60
+        comm_enabled=True,
+        log_interval=10, status_interval=10,
+        compression_test_start=200,
+    )
+    sim = Simulation(cfg)
+    sim.run()
+    final = sim.metrics.snapshots[-1]
+    assert 0.0 < final.deception_rate < 1.0, (
+        f"Expected deception_rate in (0, 1) after Phase B; got {final.deception_rate:.3f}"
+    )
+
+
+def test_q_table_explores_deception_in_against_state():
+    """
+    In 'against' state (align_bucket=0), agents have positional incentive to
+    send INVERT messages.  After Phase B exploration, the Q-table visit counts
+    for AMPLIFY and INVERT in that state must be nonzero — confirming that the
+    reward signal actually reaches the correct (state, action) cells.
+
+    Actions: 0=TRUTHFUL  1=AMPLIFY  2=INVERT
+    Q-table axes: [conf_bucket, align_bucket, action]
+    align_bucket=0 is the 'against' state.
+    """
+    cfg = SimConfig(
+        n_agents=10, n_assets=3, n_ticks=120, seed=7,
+        curriculum_honest_ticks=20,   # Phase A: 20 ticks, Phase B: 100 ticks
+        comm_enabled=True,
+        log_interval=20, status_interval=20,
+        compression_test_start=200,
+    )
+    sim = Simulation(cfg)
+    sim.run()
+
+    # Sum visits for AMPLIFY (1) and INVERT (2) across all confidence buckets
+    # and all agents, specifically in the 'against' alignment bucket (index 0).
+    against_deceptive_visits = sum(
+        int(ag._comm_q_visits[:, 0, action].sum())
+        for ag in sim.agents
+        for action in (1, 2)
+    )
+    assert against_deceptive_visits > 0, (
+        "Expected nonzero Q-table visits for AMPLIFY/INVERT in 'against' state "
+        f"after {cfg.n_ticks - cfg.curriculum_honest_ticks} Phase B ticks; "
+        f"got 0 — the deception reward signal may not be reaching the right cells"
+    )
+
+    # Sanity: truthful visits should also be nonzero (pure exploration produces all actions)
+    against_truthful_visits = int(
+        sum(ag._comm_q_visits[:, 0, 0].sum() for ag in sim.agents)
+    )
+    assert against_truthful_visits > 0, "Expected truthful visits in against state too"
