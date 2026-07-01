@@ -99,10 +99,20 @@ class Agent:
         # Delayed Q-updates: key=deadline_tick, value=(s0, s1, a, baseline_reward)
         # Applied 2 ticks after the comm action so downstream price effects are captured.
         self._pending_q_updates: Dict[int, Tuple[int, int, int, float]] = {}
-        # Outgoing tell tracking for outgoing_accuracy → HI_sus feedback
-        self._sent_tells: List[Tuple[str, float, int]] = []
+        # Outgoing tell honesty tracking for outgoing_accuracy → HI_sus feedback
+        # (set at send time in compose_message: honest = communicated ≈ belief).
         self._outgoing_confirmed: int = 0
         self._outgoing_total: int = 0
+
+        # Influence tracking: records the directional TELL sent this tick so
+        # the simulation can compute the receiver's trade response and inject
+        # it as a direct incentive bonus into the pending Q-update.  Closed
+        # per-tick; simulation writes to _pending_influence, _update_comm_q
+        # consumes it.
+        self._pending_influence: Dict[int, float] = {}   # deadline_tick → bonus
+        self._last_comm_receiver: Optional[str] = None
+        self._last_comm_asset: Optional[int] = None
+        self._last_comm_position: float = 0.0  # sender's position at comm time
 
         # --- Metrics tracking ---
         self.trade_history: List[Fill] = []
@@ -113,6 +123,12 @@ class Agent:
         self._market_impact_total: float = 0.0
         self._resolved_ev_correct: int = 0
         self._resolved_ev_total: int = 0
+        # Rolling window of recent OBSERVATION resolution outcomes (bool).
+        # belief_accuracy() averages over this window (size = cfg.eh_accuracy_window)
+        # rather than a lifetime cumulative ratio, so EH can MOVE over a run as
+        # agents shift toward higher-quality (premium) cards — a lifetime average
+        # is structurally flat once enough samples accumulate.
+        self._recent_resolutions: List[bool] = []
 
         # --- Agency / horizon index tracking ---
         self.agency_history: List["AgencyState"] = []
@@ -146,6 +162,7 @@ class Agent:
                 predicted_value=card.predicted_value,
                 confidence=card.confidence,
                 timestamp=tick,
+                true_value_at_issue=card.true_value,
             )
             self.evidence_ledger.append(ev)
             self.belief_graph.add_or_update(
@@ -168,6 +185,10 @@ class Agent:
         market_prices: np.ndarray,
     ) -> Optional[Message]:
         self._current_neighbors = neighbors  # cache for agency computation
+        # Clear influence-tracking fields; only re-set if a directional TELL fires.
+        self._last_comm_receiver = None
+        self._last_comm_asset = None
+        self._last_comm_position = 0.0
         if not neighbors:
             return None
 
@@ -252,8 +273,19 @@ class Agent:
             communicated_value = current_price - expected_delta
             communicated_confidence = min(0.95, confidence + self.cfg.invert_conf_boost)
 
-        if target_tick is not None:
-            self._sent_tells.append((key, communicated_value, target_tick))
+        # Outgoing honesty (send-time, drift-free): does the communicated value
+        # match the agent's own belief value?  Truthful sends value≈belief;
+        # AMPLIFY/INVERT diverge.  Feeds outgoing_accuracy → HI_sus.
+        self._outgoing_total += 1
+        if abs(communicated_value - value) / (abs(value) + 1e-9) < 0.10:
+            self._outgoing_confirmed += 1
+
+        # Record TELL metadata so simulation can compute the influence bonus:
+        # receiver's resulting trade in this asset × sender's position = PnL benefit.
+        if asset_idx is not None:
+            self._last_comm_receiver = receiver
+            self._last_comm_asset = asset_idx
+            self._last_comm_position = float(self.positions[asset_idx])
 
         msg = Message(
             msg_id=self._msg_counter,
@@ -394,7 +426,8 @@ class Agent:
     # Step 4: Resolve Evidence + update epistemic model
     # ------------------------------------------------------------------
 
-    def resolve_evidence(self, tick: int, world_fundamentals: "np.ndarray") -> None:
+    def resolve_evidence(self, tick: int, world: "World") -> None:
+        world_fundamentals = world.fundamentals
         for ev in self.evidence_ledger:
             if ev.status != EvidenceStatus.PENDING:
                 continue
@@ -405,8 +438,26 @@ class Agent:
                 continue
             actual = float(world_fundamentals[ev.target_asset])
             ev.actual_value = actual
-            ev.error = abs(ev.predicted_value - actual)
-            is_correct = ev.error / (abs(actual) + 1e-9) < 0.10
+            # Resolution measures whether the claim was accurate ABOUT THE STATE
+            # AT THE TIME IT WAS MADE, not whether it forecast future drift.  This
+            # is essential: world drift (≈3%/tick over multi-tick horizons) swamps
+            # the 10% threshold, so comparing against the future actual REFUTES
+            # every claim — honest or not — collapsing EH and giving the reputation
+            # system no way to separate liars from honest-but-drifted senders.
+            #   OBSERVATION: compare to the card's issue-time fundamental (exact,
+            #     stored on the evidence) → measures card signal quality (→ EH).
+            #   COMMUNICATION: compare to the fundamental at the sender's send tick
+            #     (from world history) → measures the sender's HONESTY, so truthful
+            #     tells build credibility and only genuine lies (AMPLIFY/INVERT,
+            #     which diverge from send-time truth) lose it (→ reputation loop).
+            if ev.ev_type == EvidenceType.OBSERVATION and ev.true_value_at_issue is not None:
+                check_against = ev.true_value_at_issue
+            elif ev.ev_type == EvidenceType.COMMUNICATION:
+                check_against = world.fundamental_at(ev.target_asset, ev.timestamp)
+            else:
+                check_against = actual
+            ev.error = abs(ev.predicted_value - check_against)
+            is_correct = ev.error / (abs(check_against) + 1e-9) < 0.10
             ev.status = EvidenceStatus.CONFIRMED if is_correct else EvidenceStatus.REFUTED
             self.epistemic_model.update(
                 source=ev.source,
@@ -417,29 +468,30 @@ class Agent:
             self._resolved_ev_total += 1
             if is_correct:
                 self._resolved_ev_correct += 1
+            # OBSERVATION outcomes feed the windowed accuracy that drives EH.
+            if ev.ev_type == EvidenceType.OBSERVATION:
+                self._recent_resolutions.append(is_correct)
+                win = max(self.cfg.eh_accuracy_window, 1)
+                if len(self._recent_resolutions) > win:
+                    self._recent_resolutions = self._recent_resolutions[-win:]
 
-        # Resolve outgoing tells: did what I actually send turn out to be right?
-        # This measures the accuracy of communicated values (which may be biased),
-        # not the accuracy of the agent's internal beliefs.
-        remaining = []
-        for tell_key, tell_value, tell_tick in self._sent_tells:
-            if tell_tick > tick:
-                remaining.append((tell_key, tell_value, tell_tick))
-                continue
-            asset_idx = self._parse_asset_idx(tell_key)
-            if asset_idx is None:
-                continue
-            actual = float(world_fundamentals[asset_idx])
-            err = abs(tell_value - actual)
-            self._outgoing_total += 1
-            if err / (abs(actual) + 1e-9) < 0.10:
-                self._outgoing_confirmed += 1
-        self._sent_tells = remaining
-
+        # NOTE: outgoing-tell reliability is now tracked at SEND time in
+        # compose_message (honesty = communicated value vs own belief), not here.
+        # The previous resolution-against-future-actual measure was corrupted by
+        # world drift (≈3%/tick over multi-tick horizons), so honest and
+        # deceptive senders alike appeared "inaccurate" — giving HI_sus no way to
+        # distinguish liars and leaving the UHFS objective unable to touch the
+        # comm policy.  Send-time honesty is drift-free and cleanly separates them.
         self.belief_graph.decay(tick, self.cfg.belief_decay)
 
     def outgoing_accuracy(self) -> float:
-        """Fraction of sent TELL predictions that turned out to be correct."""
+        """Fraction of sent TELL messages that were HONEST (matched own belief).
+
+        Truth is defined by comparison to the sender's private belief, per the
+        incentive-loop spec — not a flag on the message.  Feeds outgoing_rel in
+        HI_sus so a sustainability-weighted objective (UHFS) pays a cost for
+        lying that a plain-utility objective (U) does not.
+        """
         if self._outgoing_total == 0:
             return 0.5  # neutral prior: no history yet
         return self._outgoing_confirmed / self._outgoing_total
@@ -525,9 +577,16 @@ class Agent:
             })
 
         # ── Buy premium signal ────────────────────────────────────────
-        signal_utility = (w["knowledge"] * 2.0 + w["wealth"] * 0.5) * info_scale
+        # Epistemic homeostasis: seek accurate (premium, low-noise) information
+        # more when recent belief accuracy is poor, so an agent that starts on
+        # noisy free cards shifts toward premium cards and its windowed
+        # belief_accuracy (→ EH) recovers rather than staying pinned at the
+        # free-card noise floor.  Modest effect (premium cards cost cash), but it
+        # keeps EH responsive to information quality instead of a dead constant.
+        eh_boost = 1.0 + (1.0 - self.belief_accuracy())
+        signal_utility = (w["knowledge"] * 2.0 + w["wealth"] * 0.5) * info_scale * eh_boost
         if (signal_utility > 1.0 and self.cash > self.cfg.signal_base_cost * 2
-                and self.rng.random() < min(0.5, 0.15 * info_scale)):
+                and self.rng.random() < min(0.6, 0.15 * info_scale * eh_boost)):
             actions.append({"type": "buy_signal", "premium": True})
 
         return actions
@@ -609,19 +668,26 @@ class Agent:
 
     def _update_comm_q(self, current_reward: float, tick: int = 0) -> None:
         """
-        Strategy graph update: adjust weights on (situation, action) pairs.
+        Comm-policy update: adjust weights on (situation, action) pairs.
 
-        Uses a 2-tick delayed TD(0) update so the reward signal captures the
-        downstream price impact of the comm action (receiver updates belief →
-        trades → price moves → sender's position value changes) rather than
-        the pre-trade snapshot from the same tick as the action.
+        The comm policy learns from the ATTRIBUTABLE consequences of the signal:
+          - influence: how the receiver's induced trade moved price in the
+            sender's position direction (immediate, applied here at t+DELAY);
+          - reputation: how the receiver's credibility toward the sender moved
+            once the claim resolved (delayed, applied via record_comm_reputation).
+        The noisy global reward (trading PnL, drift, ventures across a 30-agent
+        market) is deliberately NOT fed into the comm delta — it buries the
+        single-agent comm effect and, for volatile objectives like UHFS, injects
+        variance that corrupts the linkage.  The OBJECTIVE still reaches the comm
+        policy: reputation_sensitivity() scales the reputation payoff per model,
+        so a sustainability-weighted objective lies less than plain utility.
         """
         # Apply any Q-update that is due this tick
         pending = self._pending_q_updates.pop(tick, None)
         if pending is not None:
-            s0, s1, a, baseline = pending
-            delayed_delta = current_reward - baseline
-            self._comm_q[s0, s1, a] += 0.1 * (delayed_delta - self._comm_q[s0, s1, a])
+            s0, s1, a = pending
+            influence = self._pending_influence.pop(tick, 0.0)
+            self._comm_q[s0, s1, a] += 0.1 * (influence - self._comm_q[s0, s1, a])
             self._comm_q_visits[s0, s1, a] += 1
 
         # Schedule Q-update for the action taken THIS tick (fires in DELAY ticks)
@@ -629,12 +695,32 @@ class Agent:
             s0, s1 = self._last_comm_state
             a = self._last_comm_action
             deadline = tick + self._COMM_Q_DELAY
-            self._pending_q_updates[deadline] = (s0, s1, a, self._prev_reward_signal)
+            self._pending_q_updates[deadline] = (s0, s1, a)
 
         # Decay mutation rate only during Phase B (free conflict); frozen in Phase A
         if not self._comm_honest_phase:
             self._comm_epsilon = max(0.05, self._comm_epsilon * 0.995)
         self._prev_reward_signal = current_reward
+
+    def record_comm_reputation(self, state: Tuple[int, int], action: int, signal: float) -> None:
+        """
+        Apply a realized REPUTATION payoff to a comm (state, action) cell.
+
+        Driven by the change in the receiver's credibility toward this sender
+        after the sender's earlier claim resolved (simulation computes Δcred and
+        calls this).  Honest claims that resolve confirmed raise credibility
+        (positive signal); deceptive claims that resolve refuted lower it
+        (negative signal), discounting the sender's future influence.
+
+        This is the tension the incentive loop needs: an immediate influence gain
+        from lying is offset by a delayed reputation loss, so honesty is sometimes
+        optimal (preserve credibility) and lying sometimes optimal (cash in now).
+        Additive nudge (not a TD blend) because reputation is a payoff increment
+        on that action, layered on top of the influence-driven value.
+        """
+        s0, s1 = state
+        self._comm_q[s0, s1, action] += signal
+        self._comm_q_visits[s0, s1, action] += 1
 
     # ------------------------------------------------------------------
     # Step 7: Execute trade
@@ -682,6 +768,11 @@ class Agent:
         return nw
 
     def belief_accuracy(self) -> float:
+        # Windowed over recent OBSERVATION resolutions so EH can move as signal
+        # quality changes over the run.  Falls back to lifetime ratio only if the
+        # window is empty (e.g. very early ticks before any observation resolves).
+        if self._recent_resolutions:
+            return sum(self._recent_resolutions) / len(self._recent_resolutions)
         if self._resolved_ev_total == 0:
             return 0.5
         return self._resolved_ev_correct / self._resolved_ev_total

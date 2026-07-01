@@ -110,6 +110,14 @@ class Simulation:
         # ── Compression test ─────────────────────────────────────────
         self._compression_targets: List[str] = []
 
+        # ── Reputation loop: pending TELLs awaiting resolution ─────────
+        # Each entry: {sender, receiver, state, action, target_tick, cred_before}.
+        # After a TELL's claim resolves, the receiver's credibility toward the
+        # sender has moved; that Δcred is fed back as a delayed reputation payoff
+        # to the sender's comm (state, action) cell.  Closes the reputation half
+        # of the incentive loop using the existing credibility structure.
+        self._rep_pending: List[Dict] = []
+
         # ── Deception-chain diagnostic tracking ───────────────────────
         # Set to the tick at which Phase B (or tick 1) starts; diagnostic
         # prints run for cfg.comm_debug_ticks ticks after that.
@@ -235,6 +243,7 @@ class Simulation:
             ag.receive_cards(cards, t)
 
         # ── 3. Communication round ────────────────────────────────────
+        # agent_map used here and again for influence bonus computation after step 6.
         agent_map = {ag.agent_id: ag for ag in self.agents}
         messages: List[Message] = []
         if self.cfg.comm_enabled:
@@ -337,19 +346,66 @@ class Simulation:
                     ]) if msg.proposition_key else 0.0,
                 })
 
-        # ── 3c. Record deception rate: TELL actions that used AMPLIFY/INVERT ─
+        # ── 3c. Record deception rate + alignment bucket + reputation-pending ─
         if self.cfg.comm_enabled:
             for _msg in messages:
                 if _msg.msg_type == MessageType.TELL:
                     _sender = agent_map.get(_msg.sender)
-                    if _sender is not None:
-                        self.metrics.record_tell(
-                            is_deceptive=_sender._last_comm_action in (1, 2)
-                        )
+                    if _sender is None or _sender._last_comm_state is None:
+                        continue
+                    _align = _sender._last_comm_state[1]
+                    self.metrics.record_tell(
+                        is_deceptive=_sender._last_comm_action in (1, 2),
+                        align_bucket=_align,
+                    )
+                    # Register the TELL for the reputation loop: snapshot the
+                    # receiver's current credibility toward this sender, to be
+                    # compared after the claim resolves at target_tick.
+                    _recv = agent_map.get(_msg.receiver)
+                    _ttick = Agent._parse_target_tick(_msg.proposition_key)
+                    if _recv is not None and _ttick is not None:
+                        self._rep_pending.append({
+                            "sender": _msg.sender,
+                            "receiver": _msg.receiver,
+                            "state": _sender._last_comm_state,
+                            "action": _sender._last_comm_action,
+                            "target_tick": _ttick,
+                            "cred_before": _recv.epistemic_model.get(
+                                _msg.sender, "price", 0.5),
+                        })
 
         # ── 4. Evidence resolution + belief updates ───────────────────
         for ag in self.agents:
-            ag.resolve_evidence(t, self.world.fundamentals)
+            ag.resolve_evidence(t, self.world)
+
+        # ── 4b. Reputation loop: pay out Δcred for TELLs that resolved ─
+        # For each pending TELL whose claim resolved at/by this tick, measure how
+        # the receiver's credibility toward the sender moved (it dropped if the
+        # claim was refuted, rose if confirmed) and feed that back to the sender's
+        # comm (state, action) cell.  This is the delayed reputation cost/benefit.
+        if self.cfg.comm_enabled and self._rep_pending:
+            still_pending: List[Dict] = []
+            for item in self._rep_pending:
+                if item["target_tick"] > t:
+                    still_pending.append(item)
+                    continue
+                sender = agent_map.get(item["sender"])
+                recv = agent_map.get(item["receiver"])
+                if sender is None or recv is None:
+                    continue
+                cred_after = recv.epistemic_model.get(item["sender"], "price", 0.5)
+                delta_cred = cred_after - item["cred_before"]
+                # Objective reaches the comm policy here: models that value
+                # sustainability/reputation (UHFS) weight this payoff more, so
+                # they lie less — while plain-utility U feels only the baseline
+                # (instrumental) reputation cost.
+                rep_scale = 1.0 + sender.reward_model.reputation_sensitivity()
+                sender.record_comm_reputation(
+                    state=item["state"],
+                    action=item["action"],
+                    signal=self.cfg.comm_reputation_weight * rep_scale * delta_cred,
+                )
+            self._rep_pending = still_pending
 
         # ── 5. Compression test ───────────────────────────────────────
         if t == self.cfg.compression_test_start:
@@ -358,6 +414,12 @@ class Simulation:
             self._inject_bad_evidence(t)
 
         # ── 6. Planning + execution ───────────────────────────────────
+        # Snapshot all agent positions BEFORE execution so we can measure each
+        # receiver's actual trade in step 6c (position_after − position_before).
+        _pos_before: Dict[str, np.ndarray] = {
+            ag.agent_id: ag.positions.copy() for ag in self.agents
+        }
+
         for ag in self.agents:
             ag.update_intervention_view(t, self.order_book.prices)
             actions = ag.plan_actions(t, self.order_book.prices, self.ventures)
@@ -369,7 +431,43 @@ class Simulation:
                 elif action["type"] == "buy_signal":
                     self._buy_signal(ag, t)
 
-        # ── 6b. Post-planning deception-chain diagnostic ─────────────
+        # ── 6b. Influence bonus: close the comm→receiver-action→sender-reward loop.
+        # For each agent that sent a directional TELL this tick, measure how much
+        # the receiver's resulting trade benefited the sender's position and
+        # schedule that as an additive bonus to the sender's pending Q-update.
+        # This lets the Q-table learn WHICH (state, action) pairs produce receiver
+        # behaviour that favours the sender — the causal link the noisy total-
+        # reward signal cannot provide in a 30-agent market.
+        if self.cfg.comm_enabled:
+            for ag in self.agents:
+                if ag._last_comm_receiver is None or ag._last_comm_asset is None:
+                    continue
+                recv = agent_map.get(ag._last_comm_receiver)
+                if recv is None:
+                    continue
+                ai = ag._last_comm_asset
+                recv_prev = _pos_before.get(ag._last_comm_receiver)
+                if recv_prev is None or ai >= len(recv_prev):
+                    continue
+                # recv_delta > 0 means receiver bought; < 0 means sold
+                recv_delta = float(recv.positions[ai] - recv_prev[ai])
+                sender_pos = ag._last_comm_position
+                # Bonus = how much receiver's trade moved price in sender's
+                # position direction.  sender_pos × recv_delta × impact_factor
+                # is the dollar PnL gained; normalised by initial_cash to a
+                # utility-scale signal, then scaled by comm_influence_gain so the
+                # single-receiver effect is visible above 30-agent reward noise.
+                bonus = (
+                    self.cfg.comm_influence_gain
+                    * sender_pos * recv_delta * self.cfg.market_impact_factor
+                    / max(ag._initial_cash, 1.0)
+                )
+                deadline = t + Agent._COMM_Q_DELAY
+                ag._pending_influence[deadline] = (
+                    ag._pending_influence.get(deadline, 0.0) + bonus
+                )
+
+        # ── 6c. Post-planning deception-chain diagnostic ─────────────
         if _debug_active and hasattr(self, "_dbg_deception_msgs"):
             for dmsg in self._dbg_deception_msgs.get(t, []):
                 recv = agent_map.get(dmsg["receiver"])

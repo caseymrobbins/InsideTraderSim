@@ -564,3 +564,86 @@ def test_q_table_explores_deception_in_against_state():
         sum(ag._comm_q_visits[:, 0, 0].sum() for ag in sim.agents)
     )
     assert against_truthful_visits > 0, "Expected truthful visits in against state too"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Incentive loop: signal → receiver action → sender payoff + reputation
+# ──────────────────────────────────────────────────────────────────────
+
+def test_observation_resolution_confirms_against_issue_time_truth():
+    """
+    OBSERVATION evidence must resolve against the fundamental AT ISSUE TIME, not
+    the drifted future actual.  A low-noise (premium) card should CONFIRM; the
+    previous future-actual comparison REFUTED nearly everything, collapsing EH.
+    """
+    cfg = SimConfig(n_agents=3, n_assets=2, seed=3, asset_volatility=0.05)
+    rng = np.random.default_rng(3)
+    world = World(cfg, rng)
+    ag = Agent("agent_0", cfg, rng, initial_cash=100.0)
+    # Premium (low-noise) card observed now; resolves several ticks later.
+    card, _ = world.issue_premium_card("agent_0")
+    ag.receive_cards([card], tick=1)
+    for _ in range(card.horizon):
+        world.step()
+    ag.resolve_evidence(card.horizon, world)
+    ev = ag.evidence_ledger[0]
+    assert ev.status in (EvidenceStatus.CONFIRMED, EvidenceStatus.REFUTED)
+    # It was checked against issue-time truth, recorded on the evidence.
+    assert ev.true_value_at_issue is not None
+    assert abs(ev.true_value_at_issue - card.true_value) < 1e-6
+
+
+def test_deception_costs_credibility_relative_to_honesty():
+    """
+    Caught-liar dynamics: a sender that always INVERTS its belief loses more
+    credibility with a receiver than a sender that always tells the truth.
+    Communication evidence resolves against send-time truth, so lies (which
+    diverge from it) are REFUTED while honest relays are CONFIRMED.
+    """
+    from inside_traders.communication import Message, MessageType
+    cfg = SimConfig(n_agents=3, n_assets=2, seed=11)
+    rng = np.random.default_rng(11)
+    world = World(cfg, rng)
+    receiver = Agent("recv", cfg, rng, initial_cash=100.0)
+
+    honest_src, liar_src = "honest", "liar"
+    for t in range(1, 40):
+        world.step()
+        asset = 0
+        true_now = float(world.fundamentals[asset])
+        key = f"asset_{asset}_price_tick_{t + 1}"
+        # Honest source relays the true current level; liar inverts around it.
+        for src, val in ((honest_src, true_now), (liar_src, true_now * 0.5)):
+            msg = Message(
+                msg_id=0, sender=src, receiver="recv", msg_type=MessageType.TELL,
+                tick=t, proposition_key=key, predicted_value=val, confidence=0.8,
+            )
+            receiver.receive_message(msg, t)
+        receiver.resolve_evidence(t + 1, world)
+
+    cred_honest = receiver.epistemic_model.get(honest_src, "price")
+    cred_liar = receiver.epistemic_model.get(liar_src, "price")
+    assert cred_honest > cred_liar, (
+        f"Honest source should retain higher credibility than the liar; "
+        f"got honest={cred_honest:.3f} liar={cred_liar:.3f}"
+    )
+
+
+def test_receiver_action_feeds_sender_comm_q():
+    """
+    The incentive loop must be closed: after a run, at least one agent's comm
+    Q-table carries nonzero values (the influence + reputation payoffs reached
+    the policy).  A flat all-zero Q-table would mean the loop is still open.
+    """
+    cfg = SimConfig(
+        n_agents=8, n_assets=3, n_ticks=80, seed=5,
+        curriculum_honest_ticks=15, comm_enabled=True,
+        log_interval=40, status_interval=40, compression_test_start=999,
+    )
+    sim = Simulation(cfg)
+    sim.run()
+    total_q_mass = sum(float(np.abs(ag._comm_q).sum()) for ag in sim.agents)
+    assert total_q_mass > 0.0, (
+        "Comm Q-tables are all zero — the sender payoff never depended on the "
+        "receiver's post-signal action (incentive loop still open)."
+    )

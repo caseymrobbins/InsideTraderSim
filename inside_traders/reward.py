@@ -60,6 +60,18 @@ class RewardModel:
     def compute(self, utility: float, agency: "AgencyState") -> float:
         raise NotImplementedError
 
+    def reputation_sensitivity(self) -> float:
+        """
+        How strongly this objective values reputation/credibility, above the
+        baseline instrumental value (lost future influence) that every objective
+        shares.  Scales the delayed reputation payoff fed to the comm policy, so
+        the OBJECTIVE reaches the comm Q-table (criterion: deception differs across
+        reward models).  Objectives that structurally reward sustainability /
+        credibility health (i.e. include an HI_sus term) return a higher value.
+        Default 0.0 = reputation matters only instrumentally, via influence.
+        """
+        return 0.0
+
     def __repr__(self) -> str:
         return f"RewardModel({self.name.value})"
 
@@ -159,6 +171,12 @@ class RewardUHFS(RewardModel):
             + self.alpha * math.log(agency.fhi + _EPS)
             + self.beta * math.log(agency.hi_sus + _EPS)
         )
+
+    def reputation_sensitivity(self) -> float:
+        # UHFS is the only model with an explicit HI_sus (sustainability/
+        # credibility) term, so it values reputation beyond instrumental influence.
+        # Scaled by β (the HI_sus weight) so the linkage tracks the objective.
+        return self.beta
 
 
 # ──────────────────────────────────────────────────────────────────────

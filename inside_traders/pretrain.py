@@ -192,7 +192,7 @@ def _pretrain_one(
             # 3. Communication round: SKIPPED (solo constraint)
 
             # 4. Evidence resolution
-            ag.resolve_evidence(t, world.fundamentals)
+            ag.resolve_evidence(t, world)
 
             # 5. Plan and execute solo actions only
             actions = ag.plan_actions(t, order_book.prices, active_ventures=[])
