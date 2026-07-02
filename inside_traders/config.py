@@ -77,6 +77,11 @@ class SimConfig:
     agency_floor: float = 0.10          # θ — danger-zone threshold on min(I_a)
     reward_fhi_weight: float = 1.0      # α — log(FHI) weight in UHFS safe-zone equation
     reward_hi_sus_weight: float = 1.0   # β — log(HI_sus) weight in UHFS safe-zone equation
+    # EMA rate for the per-agent reward baseline used to centre the safe-zone
+    # action-scale.  Lower = slower baseline (scale reacts to longer-run changes).
+    # Centring makes the scale comparable across reward models whose absolute
+    # reward levels differ by orders of magnitude (see _compute_reward_modulation).
+    reward_baseline_ema: float = 0.05
 
     # ---- Experiment / compression seeding ----
     # These control the *initial* compression test (seed specific agents with

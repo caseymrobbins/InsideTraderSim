@@ -133,6 +133,12 @@ class Agent:
         # --- Agency / horizon index tracking ---
         self.agency_history: List["AgencyState"] = []
         self._last_agency: Optional["AgencyState"] = None
+        # Running baseline (EMA) of the reward signal.  The safe-zone action-scale
+        # is centred on this so it measures relative performance ("am I doing
+        # better than my own normal") rather than the absolute reward level, which
+        # is not comparable across reward models (raw-utility U ~O(1-10) vs
+        # log-sum UHFS ~ -5).  See _compute_reward_modulation.
+        self._reward_ema: Optional[float] = None
 
         # --- Intervention view ---
         self.intervention_log: List[Dict] = []
@@ -636,6 +642,21 @@ class Agent:
         reward = self.reward_model.compute(utility, agency)
         self._update_comm_q(reward, tick)
 
+        # Reward relative to the agent's own EMA baseline.  Different reward MODELS
+        # produce wildly different absolute levels (U is a raw utility ratio,
+        # ~O(1-10); UH/UHF/UHFS are sums of logs of sub-unit indices, structurally
+        # negative ~ -5).  Feeding the absolute reward into tanh(reward) below
+        # collapsed log-sum objectives to ~0.2x activity (UHFS never traded or
+        # ventured) while saturating raw-utility ones near max — confounding the
+        # model comparison and paralysing UHFS before its epistemic edge could
+        # compound into POLI.  Centring on a per-agent baseline makes the scale
+        # mean "better/worse than my own normal", so every objective sits near
+        # 1.0 in steady state and modulates symmetrically around it.
+        if self._reward_ema is None:
+            self._reward_ema = reward
+        reward_rel = reward - self._reward_ema
+        self._reward_ema += self.cfg.reward_baseline_ema * (reward - self._reward_ema)
+
         if agency.in_danger_zone:
             # ── Danger zone ────────────────────────────────────────────
             # Determine which dimension is weakest → prioritise restoring it
@@ -651,8 +672,9 @@ class Agent:
             }
         else:
             # ── Safe zone ─────────────────────────────────────────────
-            # reward is in (-∞, +∞); tanh maps to (-1, 1); +1 centres around 1.0
-            scale = math.tanh(reward * 0.5) + 1.0   # ∈ (0, 2)
+            # Centre on the agent's own baseline: reward_rel ∈ (-∞, +∞);
+            # tanh maps to (-1, 1); +1 centres steady-state around 1.0.
+            scale = math.tanh(reward_rel * 0.5) + 1.0   # ∈ (0, 2)
             # For UHFS: sustainability dampens ventures, FHI boosts information
             hi_sus = agency.hi_sus if hasattr(agency, "hi_sus") else 1.0
             fhi    = agency.fhi    if hasattr(agency, "fhi")    else 1.0
