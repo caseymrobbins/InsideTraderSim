@@ -140,9 +140,16 @@ class Simulation:
         raw = raw / raw.max()
         wealth = self.cfg.wealth_min + raw * (self.cfg.wealth_max - self.cfg.wealth_min)
 
-        # Resolve reward model once so all agents share the same instance (or mixed)
-        from .reward import REWARD_MODELS, RewardModelName
-        default_rm = REWARD_MODELS[RewardModelName(self.cfg.reward_model)]
+        # Resolve reward model once so all agents share the same instance (or mixed).
+        # Route through get_reward_model so λ / β / the UHFS variant from the
+        # config actually reach the agents (the registry singletons use defaults).
+        from .reward import get_reward_model
+        default_rm = get_reward_model(
+            self.cfg.reward_model,
+            lam=self.cfg.reward_lambda,
+            beta=self.cfg.reward_hi_sus_weight,
+            variant=self.cfg.uhfs_variant,
+        )
 
         compressed_ids = set(self.cfg.exp_compressed_agent_ids)
 
@@ -169,6 +176,13 @@ class Simulation:
                 initial_cash=initial_cash,
                 reward_model=default_rm,
             ))
+
+        # Shared reference endowment (mean initial cash) for variant "A"
+        # liquidity — comparable across agents, independent of each agent's
+        # own tiny Pareto draw.
+        ref_wealth = float(np.mean([ag._initial_cash for ag in agents]))
+        for ag in agents:
+            ag._ref_wealth = ref_wealth
         return agents
 
     # ------------------------------------------------------------------

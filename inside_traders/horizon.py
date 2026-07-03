@@ -88,6 +88,7 @@ class AgencyState:
     ia_network: float      # degree / n_agents
     ia_solvency: float     # net_worth / initial_wealth
     ia_options: float      # fraction of strategy-graph cells still viable (weight ≥ 0)
+    ia_liquidity_shared: float  # cash / shared_reference_wealth (variant "A" liquidity)
 
     # Derived indices
     min_ia: float          # bottleneck raw dimension (min raw < θ ⇔ danger zone)
@@ -133,6 +134,7 @@ def compute_agency_state(
     ia_network   = _compute_network(agent, n_agents, max_degree)
     ia_solvency  = _compute_solvency(agent, market_prices)
     ia_options   = _compute_options(agent)
+    ia_liquidity_shared = _compute_liquidity_shared(agent)
 
     # ── Derived ───────────────────────────────────────────────────────
     ia_vec = np.array([ia_liquidity, ia_epistemic, ia_network, ia_solvency, ia_options])
@@ -148,6 +150,7 @@ def compute_agency_state(
         ia_network=ia_network,
         ia_solvency=ia_solvency,
         ia_options=ia_options,
+        ia_liquidity_shared=ia_liquidity_shared,
         min_ia=min_ia,
         hi=hi,
         f=f,
@@ -167,6 +170,17 @@ def _compute_liquidity(agent: "Agent") -> float:
         return max(_EPS, agent.cash / 100.0)
     ratio = agent.cash / agent._initial_cash
     return float(max(ratio, _EPS))
+
+
+def _compute_liquidity_shared(agent: "Agent") -> float:
+    """cash relative to a SHARED reference endowment (mean initial cash across
+    agents), so the ratio is comparable across agents and does not reward
+    having started with a tiny Pareto endowment.  Falls back to own initial
+    cash if no shared reference has been set.  Floored at ε, NO upper clip."""
+    ref = getattr(agent, "_ref_wealth", None)
+    if not ref or ref <= 0:
+        ref = getattr(agent, "_initial_cash", max(agent.cash, 1.0))
+    return float(max(agent.cash / max(ref, _EPS), _EPS))
 
 
 def _compute_epistemic(agent: "Agent") -> float:

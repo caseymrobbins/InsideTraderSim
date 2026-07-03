@@ -67,10 +67,31 @@ def _safety_term(agency: "AgencyState") -> float:
     return math.log(max(agency.min_ia / _THETA, _EPS))
 
 
-def _expansion_core(utility: float, agency: "AgencyState") -> float:
-    """E = Σ log(aᵢ) + log(U): interventions-with-agency plus utility."""
-    interv = _interventions(agency)
+def _expansion_core(utility: float, agency: "AgencyState", variant: str = "raw") -> float:
+    """
+    E = Σ log(aᵢ) + log(U): interventions-with-agency plus utility.
+
+    `variant` selects which dims enter the additive sum (H, F and the safety
+    floor always use the full raw 5-vector, so bankruptcy protection is intact
+    in every variant):
+
+      "raw" — all 5 dims (net worth enters 3×: liquidity, solvency, log U).
+      "A"   — wealth-with-floors: liquidity is measured against a SHARED
+              reference endowment and solvency is dropped from the sum (it
+              duplicates log U); wealth enters via liquidity + log U.
+      "B"   — agency-first: only the bounded quality dims (epistemic, network,
+              options) enter the sum; wealth enters ONLY through log U, so the
+              unbounded cash tail cannot dominate the agency signal.
+    """
     u = max(utility, _EPS)
+    if variant == "A":
+        dims = np.array([agency.ia_liquidity_shared, agency.ia_epistemic,
+                         agency.ia_network, agency.ia_options])
+    elif variant == "B":
+        dims = np.array([agency.ia_epistemic, agency.ia_network, agency.ia_options])
+    else:  # "raw"
+        dims = agency.ia_vector
+    interv = dims / _THETA
     return float(np.sum(np.log(np.maximum(interv, _EPS)))) + math.log(u)
 
 
@@ -151,11 +172,12 @@ class RewardUH(RewardModel):
     """
     name = RewardModelName.UH
 
-    def __init__(self, lam: float = 1.0) -> None:
+    def __init__(self, lam: float = 1.0, variant: str = "raw") -> None:
         self.lam = lam
+        self.variant = variant
 
     def compute(self, utility: float, agency: "AgencyState") -> float:
-        return self.lam * agency.hi * _expansion_core(utility, agency)
+        return self.lam * agency.hi * _expansion_core(utility, agency, self.variant)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -169,11 +191,12 @@ class RewardUHF(RewardModel):
     """
     name = RewardModelName.UHF
 
-    def __init__(self, lam: float = 1.0) -> None:
+    def __init__(self, lam: float = 1.0, variant: str = "raw") -> None:
         self.lam = lam
+        self.variant = variant
 
     def compute(self, utility: float, agency: "AgencyState") -> float:
-        return _safety_term(agency) + self.lam * agency.hi * _expansion_core(utility, agency)
+        return _safety_term(agency) + self.lam * agency.hi * _expansion_core(utility, agency, self.variant)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -199,14 +222,15 @@ class RewardUHFS(RewardModel):
     """
     name = RewardModelName.UHFS
 
-    def __init__(self, lam: float = 1.0, beta: float = 1.0) -> None:
+    def __init__(self, lam: float = 1.0, beta: float = 1.0, variant: str = "raw") -> None:
         self.lam = lam
         self.beta = beta
+        self.variant = variant
 
     def compute(self, utility: float, agency: "AgencyState") -> float:
         return (
             _safety_term(agency)
-            + self.lam * agency.hi * agency.f * _expansion_core(utility, agency)
+            + self.lam * agency.hi * agency.f * _expansion_core(utility, agency, self.variant)
         )
 
     def reputation_sensitivity(self) -> float:
@@ -232,14 +256,16 @@ def get_reward_model(
     name: "str | RewardModelName",
     lam: float = 1.0,
     beta: float = 1.0,
+    variant: str = "raw",
     *,
     alpha: float | None = None,   # deprecated: former log(FHI) weight, ignored
 ) -> RewardModel:
     """
     Retrieve a reward model by name (string or enum).
 
-    lam  — λ, the weight on the expansion term (used by UF / UH / UHF / UHFS).
-    beta — retained for UHFS.reputation_sensitivity() (sustainability linkage).
+    lam     — λ, the weight on the expansion term (UF / UH / UHF / UHFS).
+    beta    — retained for UHFS.reputation_sensitivity() (sustainability linkage).
+    variant — expansion-sum variant for the H-family ("raw" / "A" / "B").
     alpha is accepted for backward compatibility only and has no effect.
     """
     if isinstance(name, str):
@@ -247,13 +273,13 @@ def get_reward_model(
     if name == RewardModelName.U:
         return REWARD_MODELS[name]
     if name == RewardModelName.UHFS:
-        return RewardUHFS(lam=lam, beta=beta)
+        return RewardUHFS(lam=lam, beta=beta, variant=variant)
     if name == RewardModelName.UF:
         return RewardUF(lam=lam)
     if name == RewardModelName.UH:
-        return RewardUH(lam=lam)
+        return RewardUH(lam=lam, variant=variant)
     if name == RewardModelName.UHF:
-        return RewardUHF(lam=lam)
+        return RewardUHF(lam=lam, variant=variant)
     return REWARD_MODELS[name]
 
 
