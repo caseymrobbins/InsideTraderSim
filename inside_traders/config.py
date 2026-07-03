@@ -80,7 +80,7 @@ class SimConfig:
     #   "raw" — all 5 dims + log U (net worth enters 3×: liquidity, solvency, U; luck confound)
     #   "A"   — wealth-with-floors: liquidity(shared ref) + epi/net/opt + log U (solvency de-duped)
     #   "B"   — agency-first: epi/net/opt + log U only (cash dims live only in H + safety floor)
-    uhfs_variant: str = "raw"
+    uhfs_variant: str = "B"
     reward_fhi_weight: float = 1.0      # deprecated (former log(FHI) weight); no longer used
     reward_hi_sus_weight: float = 1.0   # β — weights reputation_sensitivity (sustainability linkage)
     # EMA rate for the per-agent reward baseline used to centre the safe-zone
