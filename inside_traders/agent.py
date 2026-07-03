@@ -64,7 +64,7 @@ class Agent:
             from .reward import get_reward_model
             reward_model = get_reward_model(
                 cfg.reward_model,
-                alpha=cfg.reward_fhi_weight,
+                lam=cfg.reward_lambda,
                 beta=cfg.reward_hi_sus_weight,
             )
         self.reward_model: "RewardModel" = reward_model
@@ -675,13 +675,16 @@ class Agent:
             # Centre on the agent's own baseline: reward_rel ∈ (-∞, +∞);
             # tanh maps to (-1, 1); +1 centres steady-state around 1.0.
             scale = math.tanh(reward_rel * 0.5) + 1.0   # ∈ (0, 2)
-            # For UHFS: sustainability dampens ventures, FHI boosts information
+            # For UHFS: sustainability dampens ventures, headroom boosts info-seeking.
+            # F is unbounded above, so squash it into a bounded modulation factor
+            # (this shapes behaviour only — the reward itself stays un-clipped).
             hi_sus = agency.hi_sus if hasattr(agency, "hi_sus") else 1.0
-            fhi    = agency.fhi    if hasattr(agency, "fhi")    else 1.0
+            headroom = agency.f if hasattr(agency, "f") else 1.0
+            info_boost = 1.0 + 0.5 * math.tanh(headroom)   # ∈ (1.0, 1.5)
             return {
                 "trade_scale": scale,
                 "venture_scale": scale * hi_sus,
-                "info_scale": scale * (1.0 + 0.5 * fhi),
+                "info_scale": scale * info_boost,
                 "reward": reward,
                 "agency": agency,
             }

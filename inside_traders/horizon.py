@@ -2,29 +2,57 @@
 HorizonSim Agency Indices
 =========================
 
-Computes the four quantities used by the modulated reward equations:
+Computes the quantities used by the modulated (UHFS) reward equations.
 
-  I_a   — Agency vector: 5-dimensional, each ∈ (0, 1]
+Normalisation convention (the important part)
+---------------------------------------------
+Every agency dimension is a ratio against the agent's own baseline. The
+reward normalises each by the floor θ = AGENCY_FLOOR so that, on the log
+scale used by the reward:
+
+    intervention aᵢ = raw_agencyᵢ / θ
+
+      aᵢ  = 1   →  the agent is *at the floor* — the minimum agency required
+                   to keep expanding.  log(aᵢ) = 0  (neutral, no harm).
+      aᵢ  > 1   →  above the floor, headroom to expand.  log(aᵢ) > 0.
+                   NO upper clip — growing agency keeps paying off.
+      aᵢ  < 1   →  agency is being harmed.  log(aᵢ) < 0.
+      aᵢ  → 0   →  absolute failure / bankruptcy.  log(aᵢ) → −∞.
+
+So the raw agency components below are deliberately left UN-clipped on the
+upper side (a solvent, cash-rich agent legitimately scores > 1); only a
+tiny ε floor guards the logs.
+
+  I_a   — Agency vector: 5-dimensional raw ratios (each > 0, may exceed 1)
             [0] liquidity   cash / initial_cash
             [1] epistemic   EH score (belief accuracy × uniqueness)
-            [2] network     comm-graph degree / n_agents
+            [2] network     comm-graph degree / (n_agents-1)
             [3] solvency    net_worth / initial_wealth
-            [4] options     fraction of strategy-graph cells still viable (weight ≥ 0)
+            [4] options     fraction of strategy-graph cells still viable
 
-  HI_Ia — Horizon Index of agency: geometric mean of I_a
-            HI_Ia = (∏ I_a_i)^(1/n) = exp(mean(log(I_a)))
+  HI (horizon index) — cross-metric HARMONIC mean over three horizons:
+            HI = harmonic(H_past, H_present, H_future)
+          where each H_* is the cross-metric harmonic mean of the agency
+          vector evaluated in the past (agency_history), now, and projected
+          forward along the current wealth trajectory.  Harmonic (not
+          geometric) so a collapse in ANY horizon drags HI down hard.
+          Enters the reward as a multiplicative gate on the expansion term.
 
-  FHI   — Future Horizon Index: forward-looking option value
-            FHI = belief_coverage × mean_confidence × (1 + exclusivity)
-            Clipped to [0.10, 2.00]
+  F (headroom / slack) — the structural + resource slack an agent builds up
+          BEFORE it can afford expansive exploration:
+            F = resource_headroom × structural_headroom
+              = (cash above the floor) × (fraction of strategy cells viable)
+          No upper clip.  When F → 0 the expansion term vanishes and only the
+          safety term log(min aᵢ) remains — i.e. slack has been spent.
 
-  HI_sus — Sustainability Horizon Index: trajectory stability
-            HI_sus = wealth_stability × credibility_health × (1 - betrayal_exposure)
-            Clipped to [0.05, 1.00]
+  HI_sus — Sustainability signal (credibility / betrayal exposure).  No longer
+          a core reward term; retained to modulate venture caution and to feed
+          reputation_sensitivity so the deception dynamics still see it.
 
-The "danger zone" threshold is AGENCY_FLOOR = 0.10.
-When min(I_a) < AGENCY_FLOOR, the agent is in the danger zone and
-the reward function degrades to log(min(I_a)) — heavily negative.
+The safety term (S) lives in reward.py as log(min aᵢ): 0 at the floor,
+negative once any intervention drops below 1, unbounded toward −∞ at
+bankruptcy (min raw agency → 0).  θ = AGENCY_FLOOR is still the danger-zone
+threshold on the RAW min (min raw < θ  ⇔  min aᵢ < 1).
 """
 from __future__ import annotations
 from dataclasses import dataclass
@@ -36,8 +64,19 @@ if TYPE_CHECKING:
     from .agent import Agent
     from .config import SimConfig
 
-AGENCY_FLOOR: float = 0.10    # θ — safe-zone threshold on min(I_a)
+AGENCY_FLOOR: float = 0.10    # θ — floor; raw agency = θ maps to intervention aᵢ = 1
 _EPS: float = 1e-9             # numerical floor for logs
+
+
+def _harmonic_mean(x: np.ndarray) -> float:
+    """
+    Cross-metric harmonic mean, floored at _EPS so a single zero-ish component
+    drives the mean toward zero (the property we want: you are only as strong
+    as your weakest dimension / horizon) without dividing by zero.
+    """
+    x = np.asarray(x, dtype=float)
+    x = np.maximum(x, _EPS)
+    return float(x.size / np.sum(1.0 / x))
 
 
 @dataclass(frozen=True)
@@ -51,10 +90,10 @@ class AgencyState:
     ia_options: float      # fraction of strategy-graph cells still viable (weight ≥ 0)
 
     # Derived indices
-    min_ia: float          # bottleneck dimension (triggers danger zone)
-    hi_ia: float           # geometric mean of I_a ∈ (0, 1]
-    fhi: float             # Future Horizon Index ∈ [0.10, 2.00]
-    hi_sus: float          # Sustainability Index ∈ [0.05, 1.00]
+    min_ia: float          # bottleneck raw dimension (min raw < θ ⇔ danger zone)
+    hi: float              # Horizon Index — harmonic(past, present, future), no upper clip
+    f: float               # Headroom / slack = resource_headroom × structural_headroom
+    hi_sus: float          # Sustainability signal (modulation only, not core reward)
 
     # Context
     in_danger_zone: bool   # min_ia < AGENCY_FLOOR
@@ -65,6 +104,15 @@ class AgencyState:
             self.ia_liquidity, self.ia_epistemic,
             self.ia_network, self.ia_solvency, self.ia_options,
         ])
+
+    # ── Back-compat aliases (older call sites referenced hi_ia / fhi) ──────
+    @property
+    def hi_ia(self) -> float:
+        return self.hi
+
+    @property
+    def fhi(self) -> float:
+        return self.f
 
 
 def compute_agency_state(
@@ -89,9 +137,9 @@ def compute_agency_state(
     # ── Derived ───────────────────────────────────────────────────────
     ia_vec = np.array([ia_liquidity, ia_epistemic, ia_network, ia_solvency, ia_options])
     min_ia = float(ia_vec.min())
-    hi_ia  = float(np.exp(np.mean(np.log(ia_vec + _EPS))))  # geometric mean
 
-    fhi    = _compute_fhi(agent, tick, cfg)
+    hi     = _compute_horizon_index(agent, ia_vec)          # harmonic past/present/future
+    f      = _compute_headroom(agent, market_prices)        # resource × structural slack
     hi_sus = _compute_hi_sus(agent)
 
     return AgencyState(
@@ -101,8 +149,8 @@ def compute_agency_state(
         ia_solvency=ia_solvency,
         ia_options=ia_options,
         min_ia=min_ia,
-        hi_ia=hi_ia,
-        fhi=fhi,
+        hi=hi,
+        f=f,
         hi_sus=hi_sus,
         in_danger_zone=(min_ia < AGENCY_FLOOR),
     )
@@ -113,32 +161,34 @@ def compute_agency_state(
 # ──────────────────────────────────────────────────────────────────────
 
 def _compute_liquidity(agent: "Agent") -> float:
-    """cash relative to initial endowment, clipped to (0, 1]."""
+    """cash relative to initial endowment. Floored at ε, NO upper clip
+    (holding more cash than you started with is legitimate headroom, aᵢ > 1)."""
     if not hasattr(agent, "_initial_cash") or agent._initial_cash <= 0:
-        return max(_EPS, min(1.0, agent.cash / 100.0))
+        return max(_EPS, agent.cash / 100.0)
     ratio = agent.cash / agent._initial_cash
-    return float(np.clip(ratio, _EPS, 1.0))
+    return float(max(ratio, _EPS))
 
 
 def _compute_epistemic(agent: "Agent") -> float:
-    """EH score directly from belief accuracy (clamped to (_EPS, 1])."""
+    """EH score from belief accuracy. Floored at ε; naturally ≤ 1 (an accuracy)."""
     eh = agent.belief_accuracy()
-    return float(np.clip(eh, _EPS, 1.0))
+    return float(max(eh, _EPS))
 
 
 def _compute_network(agent: "Agent", n_agents: int, max_degree: int) -> float:
-    """Fraction of possible peers reachable (degree / n_agents)."""
+    """Fraction of possible peers reachable (degree / (n_agents-1)). Floored at ε."""
     degree = len(getattr(agent, "_current_neighbors", []))
     denom = max(n_agents - 1, 1)
-    return float(np.clip(degree / denom, _EPS, 1.0))
+    return float(max(degree / denom, _EPS))
 
 
 def _compute_solvency(agent: "Agent", market_prices: np.ndarray) -> float:
-    """net_worth / initial_wealth, clipped to (_EPS, 1]."""
+    """net_worth / initial_wealth. Floored at ε, NO upper clip (a profitable
+    agent scores aᵢ > 1 and keeps being rewarded for growing agency)."""
     nw = agent.net_worth(market_prices)
     initial = getattr(agent, "_initial_cash", max(agent.cash, 1.0))
     ratio = nw / max(initial, _EPS)
-    return float(np.clip(ratio, _EPS, 1.0))
+    return float(max(ratio, _EPS))
 
 
 _OPTIONS_TEMP: float = 1.0   # softness of the viability curve around q=0
@@ -191,40 +241,82 @@ def _compute_options(agent: "Agent") -> float:
 
 
 # ──────────────────────────────────────────────────────────────────────
-# FHI — Future Horizon Index
+# HI — Horizon Index (cross-metric harmonic mean over past/present/future)
 # ──────────────────────────────────────────────────────────────────────
 
-def _compute_fhi(agent: "Agent", tick: int, cfg: "SimConfig") -> float:
+def _compute_horizon_index(agent: "Agent", present_vec: np.ndarray) -> float:
     """
-    FHI = belief_coverage × mean_confidence × (1 + info_exclusivity)
+    HI = harmonic( H_past, H_present, H_future )
 
-    belief_coverage : fraction of next K ticks the agent has actionable beliefs for
-    mean_confidence : average confidence across all pending price beliefs
-    info_exclusivity: belief_accuracy() as a proxy for unique correct info
+    where each H_* is the cross-metric harmonic mean of the agency vector at
+    that horizon:
+
+      H_present : harmonic mean of the current agency vector.
+      H_past    : same, from the most recent stored agency snapshot
+                  (agency_history); falls back to H_present early on.
+      H_future  : H_present scaled by the current wealth trajectory — if the
+                  agent's recent net worth is trending up the future horizon
+                  opens, if it is crashing the future collapses and (being a
+                  harmonic term) drags HI down hard.
+
+    Harmonic throughout: a weak metric OR a weak horizon dominates, which is
+    the intended "you are only as strong as your weakest horizon" behaviour.
+    No upper clip — a growing agent's HI exceeds 1 and keeps paying off.
     """
-    K = max(cfg.eh_accuracy_window, 5)
-    future_range = set(range(tick + 1, tick + K + 1))
+    h_present = _harmonic_mean(present_vec)
 
-    covered_ticks: set = set()
-    confidences: list = []
+    hist = getattr(agent, "agency_history", None)
+    if hist:
+        h_past = _harmonic_mean(hist[-1].ia_vector)
+    else:
+        h_past = h_present
 
-    for prop in agent.belief_graph.all_propositions():
-        if "_tick_" not in prop.key:
-            continue
-        try:
-            t = int(prop.key.split("_tick_")[1])
-        except (IndexError, ValueError):
-            continue
-        if t in future_range and prop.confidence > 0.15:
-            covered_ticks.add(t)
-            confidences.append(prop.confidence)
+    # Future horizon: project present agency along the recent wealth trajectory.
+    wh = getattr(agent, "wealth_history", None)
+    if wh and len(wh) >= 2:
+        recent = max(float(wh[-1]), _EPS)
+        base = wh[-5:-1] if len(wh) >= 5 else wh[-2:-1]
+        base_mean = max(float(np.mean(base)), _EPS)
+        growth = recent / base_mean          # >1 improving, <1 deteriorating
+    else:
+        growth = 1.0
+    h_future = max(h_present * growth, _EPS)
 
-    coverage = len(covered_ticks) / K if K > 0 else 0.0
-    mean_conf = float(np.mean(confidences)) if confidences else 0.1
-    exclusivity = agent.belief_accuracy()
+    return _harmonic_mean(np.array([h_past, h_present, h_future]))
 
-    fhi = coverage * mean_conf * (1.0 + exclusivity)
-    return float(np.clip(fhi, 0.10, 2.0))
+
+# ──────────────────────────────────────────────────────────────────────
+# F — Headroom / slack (structural + resource)
+# ──────────────────────────────────────────────────────────────────────
+
+def _compute_headroom(agent: "Agent", market_prices: np.ndarray) -> float:
+    """
+    F = resource_headroom × structural_headroom
+
+      resource_headroom : cash held ABOVE the floor, as a fraction of the
+                          initial endowment — (cash/initial_cash − θ).  This is
+                          the liquid slack the agent has accumulated and can
+                          spend on expansive (speculative) exploration.  At the
+                          floor it is 0 → the expansion term switches off and
+                          only the safety term remains.  No upper clip.
+
+      structural_headroom : fraction of the strategy graph still viable
+                          (_compute_options) — the structural room to act
+                          without (subjectively) harming itself.
+
+    Both are genuine slack the agent must build up before it can afford
+    expansive exploration; multiplying them means it needs BOTH liquid and
+    structural room, and running either down throttles exploration.
+    """
+    initial = getattr(agent, "_initial_cash", None)
+    if not initial or initial <= 0:
+        resource_headroom = max(agent.cash / 100.0 - AGENCY_FLOOR, _EPS)
+    else:
+        resource_headroom = max(agent.cash / initial - AGENCY_FLOOR, _EPS)
+
+    structural_headroom = _compute_options(agent)
+
+    return float(max(resource_headroom * structural_headroom, _EPS))
 
 
 # ──────────────────────────────────────────────────────────────────────

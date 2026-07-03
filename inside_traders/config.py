@@ -74,9 +74,10 @@ class SimConfig:
 
     # ---- Reward model ----
     reward_model: str = "U"              # one of U / UF / UH / UHF / UHFS
-    agency_floor: float = 0.10          # θ — danger-zone threshold on min(I_a)
-    reward_fhi_weight: float = 1.0      # α — log(FHI) weight in UHFS safe-zone equation
-    reward_hi_sus_weight: float = 1.0   # β — log(HI_sus) weight in UHFS safe-zone equation
+    agency_floor: float = 0.10          # θ — floor; raw agency = θ maps to intervention aᵢ = 1
+    reward_lambda: float = 1.0          # λ — weight on the expansion term λ·H·F·(Σlog aᵢ + log U)
+    reward_fhi_weight: float = 1.0      # deprecated (former log(FHI) weight); no longer used
+    reward_hi_sus_weight: float = 1.0   # β — weights reputation_sensitivity (sustainability linkage)
     # EMA rate for the per-agent reward baseline used to centre the safe-zone
     # action-scale.  Lower = slower baseline (scale reacts to longer-run changes).
     # Centring makes the scale comparable across reward models whose absolute
