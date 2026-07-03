@@ -186,6 +186,54 @@ class Simulation:
         return agents
 
     # ------------------------------------------------------------------
+    # Relational agency signal
+    # ------------------------------------------------------------------
+
+    def _accumulate_integrity(self, sender, msg, agent_map) -> None:
+        """
+        Update the sender's integrity EMA from a single TELL's effect on the
+        receiver's epistemic agency.
+
+        signal ∈ roughly [-1, +1]:
+          deceptive (AMPLIFY/INVERT) → −conf·recv_trust·min(|sent−truth|/|truth|,1)
+          honest (TRUTHFUL)          → +conf·recv_trust·(1 − min(err,1))
+        weighted by recv_trust (how much the receiver currently believes the
+        sender — i.e. how much agency is actually at stake) so lying to someone
+        who already distrusts you compresses little, and honest counsel to a
+        truster enhances much.  EMA'd so integrity is restorable.
+        """
+        action = sender._last_comm_action
+        if action not in (0, 1, 2) or msg.proposition_key is None:
+            return
+        asset_idx = sender._parse_asset_idx(msg.proposition_key)
+        if asset_idx is None:
+            return
+        truth = float(self.world.fundamentals[asset_idx])
+        sent = float(msg.predicted_value) if msg.predicted_value is not None else truth
+        conf = float(msg.confidence) if msg.confidence is not None else 0.5
+        recv = agent_map.get(msg.receiver)
+        recv_trust = recv.epistemic_model.get(msg.sender, "price", 0.5) if recv else 0.5
+        err = min(abs(sent - truth) / (abs(truth) + 1e-9), 1.0)
+        if action in (1, 2):          # deceptive → compress receiver agency
+            contribution = -conf * recv_trust * err
+        else:                          # honest → preserve/enhance receiver agency
+            contribution = conf * recv_trust * (1.0 - err)
+        a = self.cfg.integrity_ema
+        sender._integrity_signal = (1.0 - a) * sender._integrity_signal + a * contribution
+
+        # Route the agency cost into the comm policy so the objective reaches the
+        # DECISION to deceive, not just the score (the comm Q-table does not read
+        # the reward).  Scaled by how much this objective values others' agency —
+        # 0 for pure utility (keeps deceiving), > 0 for UHFS (learns not to).
+        agency_sens = sender.reward_model.agency_sensitivity()
+        if agency_sens and sender._last_comm_state is not None:
+            sender.record_comm_reputation(
+                state=sender._last_comm_state,
+                action=action,
+                signal=self.cfg.integrity_comm_weight * agency_sens * contribution,
+            )
+
+    # ------------------------------------------------------------------
     # Main run loop
     # ------------------------------------------------------------------
 
@@ -372,6 +420,16 @@ class Simulation:
                         is_deceptive=_sender._last_comm_action in (1, 2),
                         align_bucket=_align,
                     )
+                    # Relational agency signal: accumulate the net effect this TELL
+                    # had on the RECEIVER's epistemic agency into the sender's
+                    # integrity EMA.  A deceptive tell (AMPLIFY/INVERT) sent far from
+                    # truth, confidently, to a trusting receiver maximally compresses
+                    # that receiver's agency (negative); an honest, accurate tell
+                    # enhances it (positive).  Ground truth is used sim-side only —
+                    # the agent gains no privileged info, it just bears the
+                    # consequence, exactly like the reputation channel.
+                    if self.cfg.agency_coupling == "relational":
+                        self._accumulate_integrity(_sender, _msg, agent_map)
                     # Register the TELL for the reputation loop: snapshot the
                     # receiver's current credibility toward this sender, to be
                     # compared after the claim resolves at target_tick.
