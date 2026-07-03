@@ -2,46 +2,76 @@
 Reward Model Implementations
 =============================
 
-Five models compared in the experiment framework.
+Five nested models compared in the experiment framework, all on ONE log
+scale.  The building blocks (see horizon.py for the agency normalisation):
 
-Model | Description                         | Reward Formula
-------+-------------------------------------+---------------------------------------------
-U     | Plain base utility only             | R = Utility
-UF    | Base utility + Floor protection     | Danger zone: R = log(min(I_a))
-UH    | Base utility + HI term             | Safe: R = log(HI_Ia) + log(Utility)
-UHF   | Base utility + Floor + HI          | Floor + HI (no FHI / HI_sus scaling)
-UHFS  | Full modulated model                | log(HI_Ia) + log(U+ε) + α·log(FHI) + β·log(HI_sus)
-------+-------------------------------------+---------------------------------------------
+  aᵢ = raw_agencyᵢ / θ       intervention: 1 = at the floor, >1 above it
+                             (no upper clip), <1 harming agency, →0 bankrupt.
 
-The core equations (used verbatim from the spec):
+  S  = log(min aᵢ)           SAFETY term.  0 at the floor, <0 once any
+                             intervention drops below 1, → −∞ at bankruptcy.
+  E  = Σ log(aᵢ) + log(U)    EXPANSION core: the interventions-with-agency
+                             plus utility (all as unbounded logs).
+  H  = agency.hi             Horizon Index — harmonic(past, present, future).
+  F  = agency.f              Headroom / slack (resource × structural).
+  λ  = lam                   overall weight on the expansion term.
 
-  Danger Zone  (min(I_a) < θ):
-      R = log(min(I_a))
+Model | Reward Formula
+------+--------------------------------------------------------------------
+U     | R = Utility                              (raw control, no logs)
+UF    | R = S + λ·log(U)                         (safety floor + utility)
+UH    | R = λ·H·E                                (horizon-gated expansion)
+UHF   | R = S + λ·H·E                            (+ safety floor)
+UHFS  | R = S + λ·H·F·E                          (+ headroom gate on expansion)
+------+--------------------------------------------------------------------
 
-  Safe Zone (min(I_a) ≥ θ):
-      R = log(HI_Ia) + log(U+ε) + α·log(FHI) + β·log(HI_sus)
+Key properties:
+  * Nothing is clipped on the upper side; growing agency keeps paying off.
+  * When headroom F → 0 (slack spent) the whole expansion term collapses and
+    only S = log(min aᵢ) remains — so the safety term is literally "what is
+    left after the headroom has been used", and it is already negative if any
+    intervention has dropped below 1.
+  * Dropping the safety term (UH vs UHF) leaves the same scale, shifted.
 
 Utility is defined as:
   Utility = net_worth / initial_wealth   (always positive, ≥ ε)
 
-For models U and UH that have no floor, the danger zone is never
-triggered — the agent always uses the safe-zone formula (or just raw
-utility for U).
-
 Usage in agent.plan_actions():
   agency = compute_agency_state(...)
   utility = agent.net_worth(prices) / agent._initial_cash
-  reward  = REWARD_MODELS[cfg.reward_model].compute(utility, agency)
+  reward  = get_reward_model(cfg.reward_model, lam=...).compute(utility, agency)
 """
 from __future__ import annotations
 import math
 from enum import Enum, auto
 from typing import TYPE_CHECKING
 
+import numpy as np
+
+from .horizon import AGENCY_FLOOR
+
 if TYPE_CHECKING:
     from .horizon import AgencyState
 
 _EPS = 1e-9
+_THETA = AGENCY_FLOOR   # floor: raw agency = θ  ⇔  intervention aᵢ = 1
+
+
+def _interventions(agency: "AgencyState") -> "np.ndarray":
+    """Agency vector normalised by the floor θ so 1.0 sits at the floor."""
+    return agency.ia_vector / _THETA
+
+
+def _safety_term(agency: "AgencyState") -> float:
+    """S = log(min aᵢ): 0 at the floor, <0 harming, → −∞ at bankruptcy."""
+    return math.log(max(agency.min_ia / _THETA, _EPS))
+
+
+def _expansion_core(utility: float, agency: "AgencyState") -> float:
+    """E = Σ log(aᵢ) + log(U): interventions-with-agency plus utility."""
+    interv = _interventions(agency)
+    u = max(utility, _EPS)
+    return float(np.sum(np.log(np.maximum(interv, _EPS)))) + math.log(u)
 
 
 class RewardModelName(Enum):
@@ -89,56 +119,61 @@ class RewardU(RewardModel):
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Model UF — Utility + Floor
+# Model UF — Utility + Floor (safety)
 # ──────────────────────────────────────────────────────────────────────
 
 class RewardUF(RewardModel):
     """
-    Danger zone  → R = log(min(I_a))   [pushes agent to restore agency]
-    Safe zone    → R = Utility          [plain utility, no HI modulation]
+    R = S + λ·log(U)
+    Safety floor added to plain utility — no horizon (H) or headroom (F).
+    S = log(min aᵢ) is always on: 0 at the floor, negative below it, → −∞ at
+    bankruptcy, so the agent is continuously pushed to keep agency ≥ floor.
     """
     name = RewardModelName.UF
 
+    def __init__(self, lam: float = 1.0) -> None:
+        self.lam = lam
+
     def compute(self, utility: float, agency: "AgencyState") -> float:
-        if agency.in_danger_zone:
-            return math.log(agency.min_ia + _EPS)
-        return max(utility, _EPS)
+        u = max(utility, _EPS)
+        return _safety_term(agency) + self.lam * math.log(u)
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Model UH — Utility + HI
+# Model UH — Utility + Horizon
 # ──────────────────────────────────────────────────────────────────────
 
 class RewardUH(RewardModel):
     """
-    No danger-zone floor.
-    Safe zone → R = log(HI_Ia) + log(Utility)
-    Adds the epistemic/agency quality term but without sustainability scaling.
+    R = λ·H·E
+    Horizon-gated expansion, no safety floor.  Same scale as UHF, shifted by
+    the (absent) safety term.
     """
     name = RewardModelName.UH
 
+    def __init__(self, lam: float = 1.0) -> None:
+        self.lam = lam
+
     def compute(self, utility: float, agency: "AgencyState") -> float:
-        u = max(utility, _EPS)
-        return math.log(agency.hi_ia + _EPS) + math.log(u)
+        return self.lam * agency.hi * _expansion_core(utility, agency)
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Model UHF — Utility + HI + Floor
+# Model UHF — Utility + Horizon + Floor
 # ──────────────────────────────────────────────────────────────────────
 
 class RewardUHF(RewardModel):
     """
-    Danger zone  → R = log(min(I_a))
-    Safe zone    → R = log(HI_Ia) + log(Utility)
-    Floor + HI term, but no FHI or HI_sus scaling.
+    R = S + λ·H·E
+    Horizon-gated expansion plus the safety floor, but no headroom gate.
     """
     name = RewardModelName.UHF
 
+    def __init__(self, lam: float = 1.0) -> None:
+        self.lam = lam
+
     def compute(self, utility: float, agency: "AgencyState") -> float:
-        if agency.in_danger_zone:
-            return math.log(agency.min_ia + _EPS)
-        u = max(utility, _EPS)
-        return math.log(agency.hi_ia + _EPS) + math.log(u)
+        return _safety_term(agency) + self.lam * agency.hi * _expansion_core(utility, agency)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -147,35 +182,36 @@ class RewardUHF(RewardModel):
 
 class RewardUHFS(RewardModel):
     """
-    Danger zone  → R = log(min(I_a))
-    Safe zone    → R = log(HI_Ia) + log(U+ε) + α·log(FHI) + β·log(HI_sus)
+    R = S + λ·H·F·E
+      = log(min aᵢ) + λ · HI · F · ( Σ log(aᵢ) + log(U) )
 
-    Additive log formulation: each term contributes independently so no single
-    factor can collapse the reward to zero by going small.
-    α (fhi_weight) scales the forward-horizon contribution; β (hi_sus_weight)
-    scales the sustainability contribution.  Defaults are 1.0 for both.
+    The horizon index H and the headroom F both multiplicatively gate the
+    expansion term E.  As headroom F → 0 (slack spent), λ·H·F·E → 0 and the
+    reward reduces to the safety term S = log(min aᵢ) — which is already
+    negative if any intervention has dropped below 1, and unbounded toward
+    −∞ as the agent approaches bankruptcy.  Nothing is clipped above, so an
+    agent that grows agency past the floor (aᵢ, H, F all > 1) is rewarded for
+    it without bound.
+
+    β (beta) is retained only to weight reputation_sensitivity (the
+    sustainability/credibility linkage that feeds the deception dynamics);
+    it no longer appears in the reward itself.
     """
     name = RewardModelName.UHFS
 
-    def __init__(self, alpha: float = 1.0, beta: float = 1.0) -> None:
-        self.alpha = alpha  # weight on log(FHI)
-        self.beta = beta    # weight on log(HI_sus)
+    def __init__(self, lam: float = 1.0, beta: float = 1.0) -> None:
+        self.lam = lam
+        self.beta = beta
 
     def compute(self, utility: float, agency: "AgencyState") -> float:
-        if agency.in_danger_zone:
-            return math.log(agency.min_ia + _EPS)
-        u = max(utility, _EPS)
         return (
-            math.log(agency.hi_ia + _EPS)
-            + math.log(u + _EPS)
-            + self.alpha * math.log(agency.fhi + _EPS)
-            + self.beta * math.log(agency.hi_sus + _EPS)
+            _safety_term(agency)
+            + self.lam * agency.hi * agency.f * _expansion_core(utility, agency)
         )
 
     def reputation_sensitivity(self) -> float:
-        # UHFS is the only model with an explicit HI_sus (sustainability/
-        # credibility) term, so it values reputation beyond instrumental influence.
-        # Scaled by β (the HI_sus weight) so the linkage tracks the objective.
+        # UHFS is the sustainability-weighted objective, so it values reputation
+        # beyond instrumental influence.  Scaled by β so the linkage is tunable.
         return self.beta
 
 
@@ -188,23 +224,36 @@ REWARD_MODELS: dict[RewardModelName, RewardModel] = {
     RewardModelName.UF:   RewardUF(),
     RewardModelName.UH:   RewardUH(),
     RewardModelName.UHF:  RewardUHF(),
-    RewardModelName.UHFS: RewardUHFS(),  # default α=β=1.0; use get_reward_model() for custom weights
+    RewardModelName.UHFS: RewardUHFS(),  # default λ=β=1.0; use get_reward_model() for custom weights
 }
 
 
 def get_reward_model(
     name: "str | RewardModelName",
-    alpha: float = 1.0,
+    lam: float = 1.0,
     beta: float = 1.0,
+    *,
+    alpha: float | None = None,   # deprecated: former log(FHI) weight, ignored
 ) -> RewardModel:
     """
     Retrieve a reward model by name (string or enum).
-    alpha and beta are only used for UHFS (weights on log(FHI) and log(HI_sus)).
+
+    lam  — λ, the weight on the expansion term (used by UF / UH / UHF / UHFS).
+    beta — retained for UHFS.reputation_sensitivity() (sustainability linkage).
+    alpha is accepted for backward compatibility only and has no effect.
     """
     if isinstance(name, str):
         name = RewardModelName(name)
+    if name == RewardModelName.U:
+        return REWARD_MODELS[name]
     if name == RewardModelName.UHFS:
-        return RewardUHFS(alpha=alpha, beta=beta)
+        return RewardUHFS(lam=lam, beta=beta)
+    if name == RewardModelName.UF:
+        return RewardUF(lam=lam)
+    if name == RewardModelName.UH:
+        return RewardUH(lam=lam)
+    if name == RewardModelName.UHF:
+        return RewardUHF(lam=lam)
     return REWARD_MODELS[name]
 
 
