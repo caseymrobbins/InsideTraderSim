@@ -83,6 +83,17 @@ class SimConfig:
     uhfs_variant: str = "B"
     reward_fhi_weight: float = 1.0      # deprecated (former log(FHI) weight); no longer used
     reward_hi_sus_weight: float = 1.0   # β — weights reputation_sensitivity (sustainability linkage)
+    # Relational agency coupling — internalize the agency an agent compresses in
+    # OTHERS so that deception (a trans-agent compression) becomes off-gradient:
+    #   "none"       — local primitive only (deception is an unpriced externality)
+    #   "relational" — add an ia_integrity axis reading net effect on others' EH
+    agency_coupling: str = "none"
+    integrity_ema: float = 0.10         # EMA rate for the imposed-harm accumulator (restorable)
+    integrity_gain: float = 4.0         # k in ia_integrity = exp(k·signal): 0→1, <0 compress, >0 enhance
+    # Strength of the relational agency signal injected into the comm Q-table
+    # (× reward_model.agency_sensitivity()), so the objective reaches the
+    # deception DECISION, not just the score.  0 ⇒ reward-geometry only.
+    integrity_comm_weight: float = 0.5
     # EMA rate for the per-agent reward baseline used to centre the safe-zone
     # action-scale.  Lower = slower baseline (scale reacts to longer-run changes).
     # Centring makes the scale comparable across reward models whose absolute

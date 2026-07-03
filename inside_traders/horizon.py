@@ -99,12 +99,21 @@ class AgencyState:
     # Context
     in_danger_zone: bool   # min_ia < AGENCY_FLOOR
 
+    # Relational agency axis (opt-in via cfg.agency_coupling="relational").
+    # 1.0 = neutral; >1 net-enhanced others' agency; <1 compressed it (deception).
+    # Enters min_ia / hi / the reward interventions only when integrity_active.
+    ia_integrity: float = 1.0
+    integrity_active: bool = False
+
     @property
     def ia_vector(self) -> np.ndarray:
-        return np.array([
+        base = [
             self.ia_liquidity, self.ia_epistemic,
             self.ia_network, self.ia_solvency, self.ia_options,
-        ])
+        ]
+        if self.integrity_active:
+            base.append(self.ia_integrity)
+        return np.array(base)
 
     # ── Back-compat aliases (older call sites referenced hi_ia / fhi) ──────
     @property
@@ -136,8 +145,18 @@ def compute_agency_state(
     ia_options   = _compute_options(agent)
     ia_liquidity_shared = _compute_liquidity_shared(agent)
 
+    # Relational axis: the agency this agent has preserved/compressed in others.
+    # When active it joins the bottleneck (min), the horizon (hi) and the reward
+    # interventions, so compressing another agent's agency lowers this agent's
+    # own score — making deception off-gradient rather than an externality.
+    integrity_active = (getattr(cfg, "agency_coupling", "none") == "relational")
+    ia_integrity = _compute_integrity(agent, cfg) if integrity_active else 1.0
+
     # ── Derived ───────────────────────────────────────────────────────
-    ia_vec = np.array([ia_liquidity, ia_epistemic, ia_network, ia_solvency, ia_options])
+    base = [ia_liquidity, ia_epistemic, ia_network, ia_solvency, ia_options]
+    if integrity_active:
+        base.append(ia_integrity)
+    ia_vec = np.array(base)
     min_ia = float(ia_vec.min())
 
     hi     = _compute_horizon_index(agent, ia_vec)          # harmonic past/present/future
@@ -156,6 +175,8 @@ def compute_agency_state(
         f=f,
         hi_sus=hi_sus,
         in_danger_zone=(min_ia < AGENCY_FLOOR),
+        ia_integrity=ia_integrity,
+        integrity_active=integrity_active,
     )
 
 
@@ -331,6 +352,31 @@ def _compute_headroom(agent: "Agent", market_prices: np.ndarray) -> float:
     structural_headroom = _compute_options(agent)
 
     return float(max(resource_headroom * structural_headroom, _EPS))
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Integrity — relational agency (effect on OTHER agents' agency)
+# ──────────────────────────────────────────────────────────────────────
+
+def _compute_integrity(agent: "Agent", cfg: "SimConfig") -> float:
+    """
+    Map the agent's imposed-harm accumulator (`_integrity_signal`, a decaying
+    EMA the simulation maintains — negative when this agent deceived others,
+    positive when it honestly informed them) into a raw agency value:
+
+        ia_integrity = exp(k · signal)
+
+      signal = 0  → 1.0  (neutral: at the floor, log 0)
+      signal < 0  → < 1  (compressed others' agency — harms own score, and if it
+                          drops below θ it becomes the bottleneck → safety term)
+      signal > 0  → > 1  (enhanced others' agency — rewarded, no upper clip)
+
+    Same shape as every other axis: floored at ε, unbounded above, 1 = floor.
+    k = cfg.integrity_gain sets how fast sustained deception crosses the floor.
+    """
+    signal = float(getattr(agent, "_integrity_signal", 0.0))
+    k = getattr(cfg, "integrity_gain", 4.0)
+    return float(max(math.exp(k * signal), _EPS))
 
 
 # ──────────────────────────────────────────────────────────────────────

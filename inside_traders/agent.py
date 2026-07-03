@@ -105,6 +105,13 @@ class Agent:
         self._outgoing_confirmed: int = 0
         self._outgoing_total: int = 0
 
+        # Relational agency signal: decaying EMA of the net effect this agent's
+        # outgoing TELLs had on OTHER agents' epistemic agency — negative when it
+        # deceived (compressed their agency), positive when it honestly informed.
+        # Written by the simulation; read by horizon._compute_integrity.  Restorable
+        # (decays), so an agent that stops deceiving recovers its integrity axis.
+        self._integrity_signal: float = 0.0
+
         # Influence tracking: records the directional TELL sent this tick so
         # the simulation can compute the receiver's trade response and inject
         # it as a direct incentive bonus into the pending Q-update.  Closed

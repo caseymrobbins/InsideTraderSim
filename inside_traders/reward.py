@@ -85,13 +85,18 @@ def _expansion_core(utility: float, agency: "AgencyState", variant: str = "raw")
     """
     u = max(utility, _EPS)
     if variant == "A":
-        dims = np.array([agency.ia_liquidity_shared, agency.ia_epistemic,
-                         agency.ia_network, agency.ia_options])
+        dims = [agency.ia_liquidity_shared, agency.ia_epistemic,
+                agency.ia_network, agency.ia_options]
     elif variant == "B":
-        dims = np.array([agency.ia_epistemic, agency.ia_network, agency.ia_options])
-    else:  # "raw"
-        dims = agency.ia_vector
-    interv = dims / _THETA
+        dims = [agency.ia_epistemic, agency.ia_network, agency.ia_options]
+    else:  # "raw" — all five base dims
+        dims = [agency.ia_liquidity, agency.ia_epistemic, agency.ia_network,
+                agency.ia_solvency, agency.ia_options]
+    # Relational axis (opt-in): compressing another agent's agency lowers this
+    # term, so deception stops being an ascent direction under every variant.
+    if getattr(agency, "integrity_active", False):
+        dims.append(agency.ia_integrity)
+    interv = np.array(dims) / _THETA
     return float(np.sum(np.log(np.maximum(interv, _EPS)))) + math.log(u)
 
 
@@ -120,6 +125,20 @@ class RewardModel:
         reward models).  Objectives that structurally reward sustainability /
         credibility health (i.e. include an HI_sus term) return a higher value.
         Default 0.0 = reputation matters only instrumentally, via influence.
+        """
+        return 0.0
+
+    def agency_sensitivity(self) -> float:
+        """
+        How strongly this objective values OTHER agents' agency, above the
+        (zero) baseline a pure utility optimizer assigns it.  Scales the
+        relational integrity signal injected into the comm Q-table, so the
+        objective reaches the deception DECISION — not just the score.  A pure
+        utility optimizer (U) returns 0: others' agency is only variance to be
+        smoothed, so compressing it is never penalized.  Objectives with an
+        explicit agency primitive return > 0, so trans-agent compression
+        (deception) becomes a learned cost proportional to how much the
+        objective actually cares about agency.
         """
         return 0.0
 
@@ -237,6 +256,13 @@ class RewardUHFS(RewardModel):
         # UHFS is the sustainability-weighted objective, so it values reputation
         # beyond instrumental influence.  Scaled by β so the linkage is tunable.
         return self.beta
+
+    def agency_sensitivity(self) -> float:
+        # UHFS carries an explicit agency primitive, so it values other agents'
+        # agency (not just its own).  This routes the relational integrity cost
+        # into the comm policy so a UHFS agent LEARNS not to deceive, while a
+        # pure-utility agent (agency_sensitivity 0) keeps deceiving.
+        return 1.0
 
 
 # ──────────────────────────────────────────────────────────────────────
