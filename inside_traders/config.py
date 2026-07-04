@@ -94,6 +94,11 @@ class SimConfig:
     # (× reward_model.agency_sensitivity()), so the objective reaches the
     # deception DECISION, not just the score.  0 ⇒ reward-geometry only.
     integrity_comm_weight: float = 0.5
+    # Headroom (F) resource term.  "raw" = cash/initial_cash − θ (carries the tiny
+    # Pareto-endowment cash tail → wealth-dominated scores).  "stable" =
+    # log1p(cash/ref_wealth − θ): shared reference + log, so F is O(1) and the
+    # score is readable, while still unbounded above (no hard clip).
+    headroom_mode: str = "raw"
     # EMA rate for the per-agent reward baseline used to centre the safe-zone
     # action-scale.  Lower = slower baseline (scale reacts to longer-run changes).
     # Centring makes the scale comparable across reward models whose absolute

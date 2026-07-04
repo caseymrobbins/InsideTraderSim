@@ -343,11 +343,20 @@ def _compute_headroom(agent: "Agent", market_prices: np.ndarray) -> float:
     expansive exploration; multiplying them means it needs BOTH liquid and
     structural room, and running either down throttles exploration.
     """
-    initial = getattr(agent, "_initial_cash", None)
-    if not initial or initial <= 0:
-        resource_headroom = max(agent.cash / 100.0 - AGENCY_FLOOR, _EPS)
+    mode = getattr(getattr(agent, "cfg", None), "headroom_mode", "raw")
+    if mode == "stable":
+        # Scale-stable: measure liquid slack against a SHARED reference endowment
+        # and log-compress, so F stays O(1) (score is readable) yet unbounded
+        # above — no hard clip.
+        ref = getattr(agent, "_ref_wealth", None) or getattr(agent, "_initial_cash", None)
+        ref = ref if ref and ref > 0 else max(agent.cash, 1.0)
+        resource_headroom = max(math.log1p(max(agent.cash / ref - AGENCY_FLOOR, 0.0)), _EPS)
     else:
-        resource_headroom = max(agent.cash / initial - AGENCY_FLOOR, _EPS)
+        initial = getattr(agent, "_initial_cash", None)
+        if not initial or initial <= 0:
+            resource_headroom = max(agent.cash / 100.0 - AGENCY_FLOOR, _EPS)
+        else:
+            resource_headroom = max(agent.cash / initial - AGENCY_FLOOR, _EPS)
 
     structural_headroom = _compute_options(agent)
 
