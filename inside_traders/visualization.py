@@ -838,3 +838,39 @@ def plot_deception_experiment(series: dict, out_path: str = "plots/deception_exp
     plt.close(fig)
     print(f"[viz] Saved: {out_path}")
     return out_path
+
+
+def plot_counterfactual(delta_by_cond: dict, out_path: str = "plots/counterfactual.png") -> "Optional[str]":
+    """
+    Bar chart of the within-agent counterfactual: Δ = score(forced TRUTHFUL) −
+    score(forced INVERT) for a designated agent, all else equal.  Δ > 0 means
+    lying lowers the agent's own score → deception is off-gradient.
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("[viz] matplotlib not installed; skipping counterfactual plot.")
+        return None
+
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+    labels = list(delta_by_cond.keys())
+    vals = [delta_by_cond[k] for k in labels]
+    colors = {"U": "#888888", "UHFS-none": "#1f77b4", "UHFS-relational": "#2ca02c"}
+    fig, ax = plt.subplots(figsize=(8, 5))
+    bars = ax.bar(labels, vals, color=[colors.get(l, "#666") for l in labels])
+    ax.axhline(0, color="k", lw=1)
+    ax.set_ylabel("Δ score  (truthful − deceptive), same agent")
+    ax.set_title("Is deception off-gradient?  (Δ>0 ⇒ lying lowers your own score)")
+    ax.grid(alpha=0.3, axis="y")
+    for b, v in zip(bars, vals):
+        ax.text(b.get_x() + b.get_width() / 2, v,
+                f"{v:+.2f}", ha="center", va="bottom" if v >= 0 else "top", fontsize=10)
+    for lbl in ax.get_xticklabels():
+        lbl.set_rotation(12); lbl.set_ha("right")
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=120)
+    plt.close(fig)
+    print(f"[viz] Saved: {out_path}")
+    return out_path

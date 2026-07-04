@@ -243,7 +243,14 @@ class Agent:
         _p_offer = self.cfg.offer_explore_prob
         _p_other = (1.0 - _p_offer) / 4.0
         _explore_probs = [_p_other, _p_other, _p_other, _p_other, _p_offer]
-        if self._comm_honest_phase:
+        forced = getattr(self, "_forced_against_action", None)
+        if forced is not None and align_bucket == 0:
+            # Counterfactual probe: pin the action ONLY in the pays-to-lie
+            # (against) state so we can measure the causal effect of a fixed
+            # lie-vs-truth policy on this agent's own score.  Q-learning /
+            # influence / reputation / integrity still update normally.
+            action = int(forced)
+        elif self._comm_honest_phase:
             # Curriculum Phase A: only TRUTHFUL allowed; epsilon frozen
             action = 0
         elif self.rng.random() < self._comm_epsilon:
