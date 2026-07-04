@@ -22,3 +22,7 @@ checkpoints/
 
 # local experiment scratch outputs
 scratch_*.txt
+
+# generated experiment artifacts (delivered via chat, not committed)
+results/
+plots/*.png

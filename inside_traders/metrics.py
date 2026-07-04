@@ -28,6 +28,11 @@ class TickSnapshot:
     n_active_ventures: int
     asset_prices: np.ndarray
 
+    # Extended instrumentation (defaults keep older construction paths valid)
+    mean_integrity: float = 0.0                # mean agent _integrity_signal (relational agency)
+    comm_action_mix: Optional[np.ndarray] = None  # fraction of agents whose top "against" action is each of {TRUTH,AMP,INV,SILENT,OFFER}
+    q_against: Optional[np.ndarray] = None      # mean comm-Q per action in the pays-to-lie (against) state
+
 
 def gini(values: np.ndarray) -> float:
     """Gini coefficient for an array of non-negative values."""
@@ -122,6 +127,23 @@ class MetricsCollector:
                     trust_vals.extend(scores.values())
         mean_trust = float(np.mean(trust_vals)) if trust_vals else 0.5
 
+        # Relational agency + comm-strategy instrumentation
+        mean_integrity = float(np.mean([
+            getattr(a, "_integrity_signal", 0.0) for a in agents
+        ])) if agents else 0.0
+        AGAINST = 0  # position-opposes-belief state (the pays-to-lie situation)
+        q_rows, top_actions = [], []
+        for a in agents:
+            q = getattr(a, "_comm_q", None)
+            if q is None or q.shape != (3, 3, 5):
+                continue
+            row = q[:, AGAINST, :].mean(axis=0)   # mean over confidence buckets → 5-vec
+            q_rows.append(row)
+            top_actions.append(int(np.argmax(row)))
+        q_against = np.mean(q_rows, axis=0) if q_rows else np.zeros(5)
+        comm_action_mix = (np.bincount(top_actions, minlength=5) / len(top_actions)
+                           if top_actions else np.zeros(5))
+
         snap = TickSnapshot(
             tick=tick,
             agent_ids=agent_ids,
@@ -142,6 +164,9 @@ class MetricsCollector:
             mean_trust=mean_trust,
             n_active_ventures=len(active_ventures),
             asset_prices=market_prices.copy(),
+            mean_integrity=mean_integrity,
+            comm_action_mix=comm_action_mix,
+            q_against=q_against,
         )
         self.snapshots.append(snap)
         return snap

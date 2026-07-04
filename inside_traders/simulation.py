@@ -34,6 +34,7 @@ _B  = "\033[1m"  if _USE_COLOR else ""
 _RS = "\033[0m"  if _USE_COLOR else ""
 
 _BAR_CHARS = " ▁▂▃▄▅▆▇█"
+_ACTION_NAMES = {0: "TRUTH", 1: "AMP", 2: "INV", 3: "SILENT", 4: "OFFER"}
 
 def _sparkbar(values: np.ndarray, width: int = 8) -> str:
     """Tiny ASCII bar showing relative per-agent wealth (top-k)."""
@@ -632,7 +633,9 @@ class Simulation:
         corr = (float(np.corrcoef(snap.poli, snap.eh)[0, 1])
                 if len(snap.poli) >= 2 else float("nan"))
         bar = _sparkbar(np.sort(wealth_np)[::-1])
-        prices_str = " ".join(f"{p:.0f}" for p in self.order_book.prices[:3])
+        ticker = self._format_ticker()
+        strat = self._top_strategy()
+        integ = getattr(snap, "mean_integrity", 0.0)
         print(
             f"{_B}tick {t:>4}/{self.cfg.n_ticks}{_RS}"
             f" │ {_G}wealth_tot={snap.total_wealth:>10.1f}{_RS}"
@@ -641,8 +644,9 @@ class Simulation:
             f" │ r(POLI,EH)={corr:+.2f}"
             f" │ trust={snap.mean_trust:.3f}"
             f" │ decept={snap.deception_rate:.3f}"
+            f" │ strat={strat}"
+            f" │ intg={integ:+.2f}"
             f" │ ventures={n_active:>2}"
-            f" │ px=[{prices_str}…]"
             f" │ {avg_tick_ms:.1f}ms/tk"
             f" │ ETA={eta:.0f}s"
             f"{compression_flag}"
@@ -650,6 +654,42 @@ class Simulation:
             f"  {bar}",
             flush=True,
         )
+        print(f"        {_C}ticker{_RS} │ {ticker}", flush=True)
+
+    def _format_ticker(self) -> str:
+        """Full multi-asset price ticker with ▲/▼ arrows and Δ since last status."""
+        prices = np.asarray(self.order_book.prices, dtype=float)
+        prev = getattr(self, "_prev_status_prices", None)
+        parts = []
+        for i, p in enumerate(prices):
+            if prev is not None and i < len(prev):
+                d = p - prev[i]
+                if d > 1e-9:
+                    col, arrow = _G, "▲"
+                elif d < -1e-9:
+                    col, arrow = _R, "▼"
+                else:
+                    col, arrow = _Y, "="
+                parts.append(f"{col}A{i}:{p:6.1f}{arrow}{d:+5.1f}{_RS}")
+            else:
+                parts.append(f"A{i}:{p:6.1f}")
+        self._prev_status_prices = prices.copy()
+        return "  ".join(parts)
+
+    def _top_strategy(self) -> str:
+        """Modal learned comm action in the pays-to-lie (against) state across agents."""
+        AGAINST = 0
+        tops = []
+        for ag in self.agents:
+            q = getattr(ag, "_comm_q", None)
+            if q is not None and getattr(q, "shape", None) == (3, 3, 5):
+                tops.append(int(np.argmax(q[:, AGAINST, :].mean(axis=0))))
+        if not tops:
+            return "?"
+        counts = np.bincount(tops, minlength=5)
+        a = int(np.argmax(counts))
+        col = _R if a in (1, 2) else _G   # highlight deceptive strategies in red
+        return f"{col}{_ACTION_NAMES[a]}{_RS}({counts[a]}/{len(tops)})"
 
     # ------------------------------------------------------------------
     # Mid-run dashboard plot (every plot_interval ticks)

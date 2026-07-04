@@ -315,9 +315,19 @@ def get_reward_model(
 
 def compute_base_utility(agent, market_prices) -> float:
     """
-    Utility = net_worth / initial_wealth.
-    Always positive by construction (initial_wealth > 0, floor at ε).
+    Utility = net_worth / reference_wealth.
+
+    Default ("raw"): reference = the agent's own initial cash — but that is a
+    tiny Pareto draw, so U inherits an endowment-luck tail that dominates the
+    score.  Under the de-confounded score mode (cfg.headroom_mode == "stable")
+    the reference is the SHARED mean endowment (_ref_wealth), so U is comparable
+    across agents and no longer swamps the agency/integrity terms.
+    Always positive by construction (reference > 0, floor at ε).
     """
     nw = agent.net_worth(market_prices)
-    initial = getattr(agent, "_initial_cash", max(agent.cash, 1.0))
-    return max(nw / max(initial, _EPS), _EPS)
+    if getattr(getattr(agent, "cfg", None), "headroom_mode", "raw") == "stable":
+        ref = getattr(agent, "_ref_wealth", None) or getattr(agent, "_initial_cash", None)
+    else:
+        ref = getattr(agent, "_initial_cash", None)
+    ref = ref if ref and ref > 0 else max(agent.cash, 1.0)
+    return max(nw / max(ref, _EPS), _EPS)

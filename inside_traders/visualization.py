@@ -779,3 +779,98 @@ def run_all_plots(sim: "Simulation") -> None:
         plot_compression_test(m, sim._compression_targets, sim.cfg.compression_test_start)
     # Final dashboard
     plot_midrun_dashboard(sim, sim.tick, sim.cfg.plot_dir)
+
+
+def plot_deception_experiment(series: dict, out_path: str = "plots/deception_experiment.png") -> "Optional[str]":
+    """
+    Multi-panel comparison of the deception off-gradient experiment.
+
+    `series` maps condition label → dict of equal-length lists:
+        tick, deception, trust, eh, q_inv, integrity
+    (per-tick, already averaged across seeds).  Produces a 2×2 PNG:
+      (0,0) deception rate vs tick     (0,1) Q[against,INVERT] vs tick
+      (1,0) trust (solid) & EH (dashed)  (1,1) final deception bar by condition
+    Returns the saved path, or None if matplotlib is unavailable.
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("[viz] matplotlib not installed; skipping deception experiment plot.")
+        return None
+
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+    colors = {"U": "#888888", "UHFS-none": "#1f77b4", "UHFS-relational": "#2ca02c"}
+
+    def col(label):
+        return colors.get(label, None)
+
+    fig, ax = plt.subplots(2, 2, figsize=(13, 9))
+    fig.suptitle("Relational agency coupling — deception off-gradient", fontsize=14, fontweight="bold")
+
+    for label, s in series.items():
+        ax[0, 0].plot(s["tick"], s["deception"], label=label, color=col(label), lw=2)
+        ax[0, 1].plot(s["tick"], s["q_inv"], label=label, color=col(label), lw=2)
+        ax[1, 0].plot(s["tick"], s["trust"], label=label, color=col(label), lw=2)
+        ax[1, 0].plot(s["tick"], s["eh"], label=f"{label} EH", color=col(label), lw=1, ls="--", alpha=0.7)
+
+    ax[0, 0].set_title("Deception rate over time"); ax[0, 0].set_xlabel("tick")
+    ax[0, 0].set_ylabel("deception rate"); ax[0, 0].grid(alpha=0.3); ax[0, 0].legend(fontsize=8)
+    ax[0, 1].axhline(0, color="k", lw=0.8, ls=":")
+    ax[0, 1].set_title("Learned value of lying  Q[against, INVERT]"); ax[0, 1].set_xlabel("tick")
+    ax[0, 1].set_ylabel("mean comm-Q"); ax[0, 1].grid(alpha=0.3); ax[0, 1].legend(fontsize=8)
+    ax[1, 0].set_title("Trust (solid) & epistemic health (dashed)"); ax[1, 0].set_xlabel("tick")
+    ax[1, 0].set_ylabel("mean"); ax[1, 0].grid(alpha=0.3); ax[1, 0].legend(fontsize=7)
+
+    labels = list(series.keys())
+    finals = [series[l]["deception"][-1] for l in labels]
+    bars = ax[1, 1].bar(labels, finals, color=[col(l) or "#666" for l in labels])
+    ax[1, 1].set_title("Final deception rate by condition"); ax[1, 1].set_ylabel("deception rate")
+    ax[1, 1].grid(alpha=0.3, axis="y")
+    for b, v in zip(bars, finals):
+        ax[1, 1].text(b.get_x() + b.get_width() / 2, v, f"{v:.2f}", ha="center", va="bottom", fontsize=9)
+    for lbl in ax[1, 1].get_xticklabels():
+        lbl.set_rotation(15); lbl.set_ha("right")
+
+    plt.tight_layout(rect=(0, 0, 1, 0.97))
+    plt.savefig(out_path, dpi=120)
+    plt.close(fig)
+    print(f"[viz] Saved: {out_path}")
+    return out_path
+
+
+def plot_counterfactual(delta_by_cond: dict, out_path: str = "plots/counterfactual.png") -> "Optional[str]":
+    """
+    Bar chart of the within-agent counterfactual: Δ = score(forced TRUTHFUL) −
+    score(forced INVERT) for a designated agent, all else equal.  Δ > 0 means
+    lying lowers the agent's own score → deception is off-gradient.
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("[viz] matplotlib not installed; skipping counterfactual plot.")
+        return None
+
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+    labels = list(delta_by_cond.keys())
+    vals = [delta_by_cond[k] for k in labels]
+    colors = {"U": "#888888", "UHFS-none": "#1f77b4", "UHFS-relational": "#2ca02c"}
+    fig, ax = plt.subplots(figsize=(8, 5))
+    bars = ax.bar(labels, vals, color=[colors.get(l, "#666") for l in labels])
+    ax.axhline(0, color="k", lw=1)
+    ax.set_ylabel("Δ score  (truthful − deceptive), same agent")
+    ax.set_title("Is deception off-gradient?  (Δ>0 ⇒ lying lowers your own score)")
+    ax.grid(alpha=0.3, axis="y")
+    for b, v in zip(bars, vals):
+        ax.text(b.get_x() + b.get_width() / 2, v,
+                f"{v:+.2f}", ha="center", va="bottom" if v >= 0 else "top", fontsize=10)
+    for lbl in ax.get_xticklabels():
+        lbl.set_rotation(12); lbl.set_ha("right")
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=120)
+    plt.close(fig)
+    print(f"[viz] Saved: {out_path}")
+    return out_path

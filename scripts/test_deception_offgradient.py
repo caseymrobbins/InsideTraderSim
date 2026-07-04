@@ -14,13 +14,19 @@ Compares the U control against UHFS(variant=B) with agency_coupling ∈
 
 Run:  PYTHONPATH=. python3 scripts/test_deception_offgradient.py
 """
+import os
+import csv
+import json
 import numpy as np
 from inside_traders.config import SimConfig
 from inside_traders.reward import get_reward_model, compute_base_utility
+from inside_traders.checkpoint import save_checkpoint
 
 SEEDS = [1, 2, 3, 4, 5, 6]
 N, T = 24, 500
 AGAINST, INVERT, AMPLIFY = 0, 2, 1   # comm-Q state/action indices
+HEADROOM = "stable"   # de-confounded score so the integrity penalty registers
+RESULTS_DIR, CKPT_DIR, PLOT_DIR = "results", "checkpoints", "plots"
 
 
 def agent_deception_rate(ag):
@@ -30,22 +36,51 @@ def agent_deception_rate(ag):
     return 1.0 - ag.outgoing_accuracy()
 
 
-def run(model, coupling, seed):
+def run(model, coupling, seed, verbose=False):
     from inside_traders.simulation import Simulation
     cfg = SimConfig(n_agents=N, n_ticks=T, reward_model=model,
-                    uhfs_variant="B", agency_coupling=coupling, seed=seed,
-                    verbose=False)
+                    uhfs_variant="B", agency_coupling=coupling,
+                    headroom_mode=HEADROOM, seed=seed, verbose=verbose,
+                    plot_interval=T + 1)   # no midrun dashboard PNGs during the sweep
     sim = Simulation(cfg)
     col = sim.run()
+    # Persist the learned models (comm_q / epistemic / preferences) after each run.
+    os.makedirs(CKPT_DIR, exist_ok=True)
+    save_checkpoint(sim.agents, f"{CKPT_DIR}/{model}_{coupling}_seed{seed}.json")
     return sim, col
 
 
-def collect(model, coupling):
+def _series_from(col):
+    """Per-tick series from one run's snapshots."""
+    snaps = col.snapshots
+    q_inv = [float(s.q_against[INVERT]) if s.q_against is not None else 0.0 for s in snaps]
+    return {
+        "tick": [s.tick for s in snaps],
+        "deception": [s.deception_rate for s in snaps],
+        "trust": [s.mean_trust for s in snaps],
+        "eh": [float(np.mean(s.eh)) for s in snaps],
+        "q_inv": q_inv,
+        "integrity": [getattr(s, "mean_integrity", 0.0) for s in snaps],
+    }
+
+
+def _avg_series(series_list):
+    """Average aligned per-tick series across seeds (truncate to shortest)."""
+    m = min(len(s["tick"]) for s in series_list)
+    out = {"tick": series_list[0]["tick"][:m]}
+    for k in ("deception", "trust", "eh", "q_inv", "integrity"):
+        out[k] = list(np.mean([s[k][:m] for s in series_list], axis=0))
+    return out
+
+
+def collect(model, coupling, verbose_first=False):
     # pooled per-agent arrays across seeds
     dec, score, eh = [], [], []
     inv_cells, sys_dec, sys_eh, sys_trust = [], [], [], []
-    for sd in SEEDS:
-        sim, col = run(model, coupling, sd)
+    series_list = []
+    for i, sd in enumerate(SEEDS):
+        sim, col = run(model, coupling, sd, verbose=(verbose_first and i == 0))
+        series_list.append(_series_from(col))
         for ag in sim.agents:
             d = agent_deception_rate(ag)
             if d is None:
@@ -63,6 +98,7 @@ def collect(model, coupling):
         sys_dec.append(np.mean([s.deception_rate for s in snaps]))
         sys_eh.append(np.mean([s.eh.mean() for s in snaps]))
         sys_trust.append(np.mean([s.mean_trust for s in snaps]))
+    series = _avg_series(series_list)
     dec, score, eh = np.array(dec), np.array(score), np.array(eh)
     ok = ~np.isnan(score)
     dec_s, score_s, eh_s = dec[ok], score[ok], eh[ok]
@@ -85,7 +121,26 @@ def collect(model, coupling):
         "sys_trust": float(np.mean(sys_trust)),
         "honest_minus_liar_score": collateral[0],
         "honest_minus_liar_eh": collateral[1],
+        "_series": series,
     }
+
+
+def _export(rows):
+    """Write per-condition time-series CSVs and a summary JSON."""
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    summary = {}
+    for label, r in rows.items():
+        s = r["_series"]
+        with open(f"{RESULTS_DIR}/{label}.csv", "w", newline="") as fh:
+            w = csv.writer(fh)
+            w.writerow(["tick", "deception", "trust", "eh", "q_inv", "integrity"])
+            for i in range(len(s["tick"])):
+                w.writerow([s["tick"][i], s["deception"][i], s["trust"][i],
+                            s["eh"][i], s["q_inv"][i], s["integrity"][i]])
+        summary[label] = {k: r[k] for k in r if k != "_series"}
+    with open(f"{RESULTS_DIR}/summary.json", "w") as fh:
+        json.dump(summary, fh, indent=2)
+    print(f"[data] wrote {RESULTS_DIR}/*.csv and summary.json")
 
 
 def sim_prices(sim):
@@ -98,8 +153,19 @@ def main():
     rows = {}
     for model, coupling in configs:
         label = "U" if model == "U" else f"UHFS-{coupling}"
-        rows[label] = collect(model, coupling)
+        # Show one live (verbose) run of the headline condition so the ticker /
+        # top-strategy / integrity readout is visible while it trains.
+        verbose_first = (label == "UHFS-relational")
+        rows[label] = collect(model, coupling, verbose_first=verbose_first)
     _print_table(rows)
+    _export(rows)
+    # Graphs
+    try:
+        from inside_traders import visualization as viz
+        series = {label: rows[label]["_series"] for label in rows}
+        viz.plot_deception_experiment(series, f"{PLOT_DIR}/deception_experiment.png")
+    except Exception as e:  # never let plotting failure lose the numbers
+        print(f"[viz] plotting skipped: {e}")
 
 
 def _print_table(rows):
