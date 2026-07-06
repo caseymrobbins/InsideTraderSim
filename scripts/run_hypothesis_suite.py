@@ -190,11 +190,19 @@ def build_report(quick: bool) -> str:
         v = rf["dose_response"][str(float(w))]
         W(f"| {w} | {v['final_deception']['mean']:.3f} | {v['mean_frac_danger']['mean']:.3f} "
           f"| {v['final_integrity']['mean']:.3f} | {v['total_wealth']['mean']:.0f} |")
-    W(f"\n**Verdict:** {_verdict(rf['supports_s4'])} — vs UHFS-relational, UHFSR "
-      f"lowers deception: `{rf['beats_deception']}`, lowers floor time: `{rf['beats_floor']}`, "
-      f"welfare ratio {rf['welfare_ratio_uhfsr_over_uhfs']:.2f} "
-      f"(`comparable_welfare={rf['comparable_welfare']}`); dose-response monotone(≈): "
-      f"`{rf['dose_monotone']}` (net deception drop w_rel 0→max = {rf['dose_net_deception_drop']:+.3f}).\n")
+    # Primary (beats UHFS-relational at comparable welfare) vs confirmatory (dose-response):
+    # a full green needs both; primary-only is partial (the first-order-ness claim, i.e.
+    # dose-dependence, is unconfirmed — pricing others' agency at all is the dominant effect).
+    s4_full = rf["supports_s4"] and rf["dose_monotone"] and abs(rf["dose_net_deception_drop"]) > 0.01
+    W(f"\n**Verdict:** {_verdict(s4_full, partial=(rf['supports_s4'] and not s4_full))}")
+    W(f"- *Primary (passed):* vs UHFS-relational, UHFSR lowers deception "
+      f"(`{rf['beats_deception']}`) and floor time (`{rf['beats_floor']}`) at comparable welfare "
+      f"(ratio {rf['welfare_ratio_uhfsr_over_uhfs']:.2f}) — but marginally (see the table).")
+    W(f"- *Confirmatory (failed):* the `w_rel` dose-response is flat / non-monotone "
+      f"(`monotone={rf['dose_monotone']}`, net deception drop w_rel 0→max = "
+      f"{rf['dose_net_deception_drop']:+.3f}), so making the relational term *first-order* adds "
+      "little beyond merely *pricing* it. The dominant, robust effect is U→UHFS-relational "
+      "(deception 0.63→0.25); the first-order barrier is a small further gain, not a new regime.\n")
     W("![S4](relational_first.png)\n")
 
     # ---- Synthesis ----
@@ -224,12 +232,14 @@ def build_report(quick: bool) -> str:
       "UHFS preserves aggregate welfare (ratio ≈ "
       f"{h4['welfare_ratio_uhfs_over_u']:.2f}) yet does not reduce floor-violation time vs plain U in "
       "this sim/budget; the alignment gains route through the relational channel, not the own-agency barrier.\n")
-    _s4 = "improves" if rf["beats_deception"] else "does not improve"
-    W(f"- **S4 (UHFSR) — the acted-on prediction.** Making relational agency a first-order, "
-      f"non-compensatory barrier {_s4} deception vs UHFS-relational "
-      f"(welfare ratio {rf['welfare_ratio_uhfsr_over_uhfs']:.2f}); dose-response monotone(≈): "
-      f"`{rf['dose_monotone']}`. This is the objective the round-1 findings pointed to, tested "
-      "directly rather than assumed.\n")
+    _s4 = "marginally improves" if rf["beats_deception"] else "does not improve"
+    W(f"- **S4 (UHFSR) — the acted-on prediction, only partly borne out.** Making relational agency "
+      f"a first-order, non-compensatory barrier {_s4} deception vs UHFS-relational "
+      f"(welfare ratio {rf['welfare_ratio_uhfsr_over_uhfs']:.2f}), but the `w_rel` dose-response is "
+      f"flat (monotone: `{rf['dose_monotone']}`). So the operative move is *pricing* others' agency "
+      "at all (U→UHFS-relational, the large effect); making it strictly first-order adds a small, "
+      "noise-band gain rather than a new regime. The thesis's direction holds; its 'first-order' "
+      "emphasis is not what carries the effect in this sim.\n")
 
     # ---- Caveats ----
     W("## Scope & reproducibility caveats\n")
