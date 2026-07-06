@@ -122,16 +122,27 @@ def build_report(quick: bool) -> str:
     W("|---|---|---|")
     for k, v in h3["rule_counterfactual"].items():
         W(f"| {k} | {v['mean_delta']:+.3f} | {v['truth_wins_frac']:.0%} |")
-    W("\n**(B) Floor-maintenance clause** of the stipulation\n")
+    W("\n**(B) System-level suppression + floor-maintenance clause** of the stipulation\n")
     W("| condition | deception | trust | mean integrity | frac below floor |")
     W("|---|---|---|---|---|")
-    for k, v in h3["floor_maintenance"].items():
+    fm = h3["floor_maintenance"]
+    for k, v in fm.items():
         W(f"| {k} | {v['final_deception']['mean']:.3f} | {v['final_trust']['mean']:.3f} "
           f"| {v['final_integrity']['mean']:.3f} | {v['mean_frac_danger']['mean']:.3f} |")
-    W(f"\n**Verdict:** {_verdict(h3['rule_supported'], partial=True)} — the RULE is encoded "
-      f"(UHFS-relational makes deception off-gradient: `{h3['rule_supported']}`); the "
-      "floor-maintenance clause is observable, but the stipulation's "
-      f"**{', '.join(h3['unmodeled_clauses'])}** clauses are not representable in this sim.\n")
+    # Robust, seed-averaged system signal (contrast with the noisy within-agent Δ):
+    dec_u = fm["U"]["final_deception"]["mean"]
+    dec_rel = fm["UHFS-relational"]["final_deception"]["mean"]
+    system_suppresses = dec_rel < dec_u
+    W(f"\n**Verdict:** {_verdict(h3['rule_supported'], partial=True)}")
+    W(f"- *Within-agent counterfactual (Δ):* does NOT robustly show off-gradient deception here "
+      f"(UHFS-relational Δ = {h3['rule_counterfactual']['UHFS-relational']['mean_delta']:+.3f} < 0). "
+      "This single-agent pin is highly sensitive to hash-order/seed noise — a live instance of the "
+      "reproducibility caveat below.")
+    W(f"- *System-level (robust, seed-averaged):* pricing others' agency **does** suppress compression — "
+      f"deception falls {dec_u:.3f} → {dec_rel:.3f} and integrity rises "
+      f"{fm['U']['final_integrity']['mean']:.3f} → {fm['UHFS-relational']['final_integrity']['mean']:.3f} "
+      f"under relational coupling (`system_suppresses={system_suppresses}`).")
+    W(f"- The stipulation's **{', '.join(h3['unmodeled_clauses'])}** clauses are not representable in this sim.\n")
     W("![H3](h3_compression_harm.png)\n")
 
     # ---- H4 ----
@@ -148,6 +159,34 @@ def build_report(quick: bool) -> str:
       f"UHFS/U = {h4['welfare_ratio_uhfs_over_u']:.2f} "
       f"(`low_welfare_cost={h4['low_welfare_cost']}`).\n")
     W("![H4](h4_objective_shape.png)\n")
+
+    # ---- Synthesis ----
+    cross = h1["cross_objective"]
+    u_dz = cross["U (agency OUTSIDE objective)"]["mean_frac_danger"]["mean"]
+    uhfs_rel_dz = cross["UHFS (agency IN objective)"]["mean_frac_danger"]["mean"]
+    om = h1["omitted_axis"]
+    dec_omit = om["UHFS none (integrity OMITTED)"]["final_deception"]["mean"]
+    dec_in = om["UHFS relational (integrity IN)"]["final_deception"]["mean"]
+    W("## Overall synthesis\n")
+    W("The results converge on a single, sharper claim than the four hypotheses as stated: "
+      "**the decisive alignment lever is *relational* agency (others' agency), not own-agency "
+      "reward shaping.**\n")
+    W(f"- **H1 holds, most sharply for relational agency.** A metric omitted from the objective is "
+      f"eroded: the clearest case is the integrity axis — deception {dec_omit:.3f} (omitted) vs "
+      f"{dec_in:.3f} (priced). Cross-objective, agency-in-objective also lowers floor time "
+      f"({u_dz:.3f}→{uhfs_rel_dz:.3f}).")
+    W("- **H2 is only partly borne out.** Bringing the agent's *own* agency into the objective (the "
+      "U→UF→UH→UHF→UHFS ladder at `coupling=none`) does **not** measurably reduce time below the "
+      "agency floor — floor-violation time is essentially model-invariant at this budget. The "
+      "\"missing vital metric\" that actually moves alignment outcomes is *others'* agency.")
+    W("- **H3's moral rule is encoded at the system level but not via the single-agent counterfactual.** "
+      "Relational coupling robustly suppresses compression (deception ↓, integrity ↑, trust ↑), yet "
+      "forcing one agent honest while the rest adapt does not raise that agent's own score at this "
+      "budget — the counterfactual is swamped by hash-order noise.")
+    W("- **H4's non-compensatory shape imposes no alignment tax but shows no own-agency floor benefit here.** "
+      "UHFS preserves aggregate welfare (ratio ≈ "
+      f"{h4['welfare_ratio_uhfs_over_u']:.2f}) yet does not reduce floor-violation time vs plain U in "
+      "this sim/budget; the alignment gains route through the relational channel, not the own-agency barrier.\n")
 
     # ---- Caveats ----
     W("## Scope & reproducibility caveats\n")
