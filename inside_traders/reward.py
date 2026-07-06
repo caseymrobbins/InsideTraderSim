@@ -23,6 +23,7 @@ UF    | R = S + λ·log(U)                         (safety floor + utility)
 UH    | R = λ·H·E                                (horizon-gated expansion)
 UHF   | R = S + λ·H·E                            (+ safety floor)
 UHFS  | R = S + λ·H·F·E                          (+ headroom gate on expansion)
+UHFSR | R = S + w_rel·log(a_int) + λ·H·F·E       (+ relational first-order barrier)
 ------+--------------------------------------------------------------------
 
 Key properties:
@@ -67,6 +68,25 @@ def _safety_term(agency: "AgencyState") -> float:
     return math.log(max(agency.min_ia / _THETA, _EPS))
 
 
+def _rel_safety_term(agency: "AgencyState", w: float) -> float:
+    """
+    Relational safety barrier S_rel = w · log(ia_integrity / θ).
+
+    First-order, non-compensatory analogue of `_safety_term` for OTHERS' agency:
+    0 at the floor, <0 once the agent has net-compressed others' agency, → −∞ as
+    that compression deepens — so no finite utility can buy below-floor compression
+    of others (deception). Unlike the integrity axis's membership in the gated
+    expansion sum, this term is additive and ungated, making relational agency a
+    first-order optimisation target.
+
+    No-op (0.0) when the relational axis is inactive (agency_coupling != "relational"),
+    so it degrades gracefully. Clamped by _EPS exactly like _safety_term.
+    """
+    if w == 0.0 or not getattr(agency, "integrity_active", False):
+        return 0.0
+    return w * math.log(max(agency.ia_integrity / _THETA, _EPS))
+
+
 def _expansion_core(utility: float, agency: "AgencyState", variant: str = "raw") -> float:
     """
     E = Σ log(aᵢ) + log(U): interventions-with-agency plus utility.
@@ -101,11 +121,12 @@ def _expansion_core(utility: float, agency: "AgencyState", variant: str = "raw")
 
 
 class RewardModelName(Enum):
-    U    = "U"
-    UF   = "UF"
-    UH   = "UH"
-    UHF  = "UHF"
-    UHFS = "UHFS"
+    U     = "U"
+    UF    = "UF"
+    UH    = "UH"
+    UHF   = "UHF"
+    UHFS  = "UHFS"
+    UHFSR = "UHFSR"
 
 
 class RewardModel:
@@ -266,15 +287,48 @@ class RewardUHFS(RewardModel):
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Model UHFSR — Relational-first modulated model (the updated thesis model)
+# ──────────────────────────────────────────────────────────────────────
+
+class RewardUHFSR(RewardUHFS):
+    """
+    R = S_own + w_rel·log(ia_integrity/θ) + λ·H·F·E
+      = UHFS + a first-order, non-compensatory RELATIONAL log-barrier.
+
+    UHFS already carries others' agency, but only weakly: ia_integrity is one term
+    inside the H·F-gated expansion sum E and reaches the safety barrier only if it
+    happens to be the global min.  UHFSR adds a dedicated relational barrier
+    S_rel = w_rel·log(ia_integrity/θ) that is additive and ungated — so compressing
+    others' agency (deception) drives reward → −∞ regardless of headroom or which dim
+    is the bottleneck.  This makes RELATIONAL agency a first-order optimisation target:
+    utility is permitted only after BOTH the own-agency floor (S_own) and the
+    others'-agency floor (S_rel) hold.
+
+    Requires agency_coupling="relational" for ia_integrity to be live; without it the
+    barrier is a no-op and UHFSR reduces to UHFS.
+    """
+    name = RewardModelName.UHFSR
+
+    def __init__(self, lam: float = 1.0, beta: float = 1.0, variant: str = "raw",
+                 rel_weight: float = 1.0) -> None:
+        super().__init__(lam=lam, beta=beta, variant=variant)
+        self.rel_weight = rel_weight
+
+    def compute(self, utility: float, agency: "AgencyState") -> float:
+        return super().compute(utility, agency) + _rel_safety_term(agency, self.rel_weight)
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Registry
 # ──────────────────────────────────────────────────────────────────────
 
 REWARD_MODELS: dict[RewardModelName, RewardModel] = {
-    RewardModelName.U:    RewardU(),
-    RewardModelName.UF:   RewardUF(),
-    RewardModelName.UH:   RewardUH(),
-    RewardModelName.UHF:  RewardUHF(),
-    RewardModelName.UHFS: RewardUHFS(),  # default λ=β=1.0; use get_reward_model() for custom weights
+    RewardModelName.U:     RewardU(),
+    RewardModelName.UF:    RewardUF(),
+    RewardModelName.UH:    RewardUH(),
+    RewardModelName.UHF:   RewardUHF(),
+    RewardModelName.UHFS:  RewardUHFS(),   # default λ=β=1.0; use get_reward_model() for custom weights
+    RewardModelName.UHFSR: RewardUHFSR(),  # default λ=β=rel_weight=1.0
 }
 
 
@@ -283,21 +337,25 @@ def get_reward_model(
     lam: float = 1.0,
     beta: float = 1.0,
     variant: str = "raw",
+    rel_weight: float = 1.0,
     *,
     alpha: float | None = None,   # deprecated: former log(FHI) weight, ignored
 ) -> RewardModel:
     """
     Retrieve a reward model by name (string or enum).
 
-    lam     — λ, the weight on the expansion term (UF / UH / UHF / UHFS).
-    beta    — retained for UHFS.reputation_sensitivity() (sustainability linkage).
-    variant — expansion-sum variant for the H-family ("raw" / "A" / "B").
+    lam        — λ, the weight on the expansion term (UF / UH / UHF / UHFS / UHFSR).
+    beta       — retained for UHFS(R).reputation_sensitivity() (sustainability linkage).
+    variant    — expansion-sum variant for the H-family ("raw" / "A" / "B").
+    rel_weight — w_rel, weight on the UHFSR relational log-barrier (ignored by others).
     alpha is accepted for backward compatibility only and has no effect.
     """
     if isinstance(name, str):
         name = RewardModelName(name)
     if name == RewardModelName.U:
         return REWARD_MODELS[name]
+    if name == RewardModelName.UHFSR:
+        return RewardUHFSR(lam=lam, beta=beta, variant=variant, rel_weight=rel_weight)
     if name == RewardModelName.UHFS:
         return RewardUHFS(lam=lam, beta=beta, variant=variant)
     if name == RewardModelName.UF:

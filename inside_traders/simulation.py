@@ -150,6 +150,7 @@ class Simulation:
             lam=self.cfg.reward_lambda,
             beta=self.cfg.reward_hi_sus_weight,
             variant=self.cfg.uhfs_variant,
+            rel_weight=self.cfg.relational_barrier_weight,
         )
 
         compressed_ids = set(self.cfg.exp_compressed_agent_ids)
