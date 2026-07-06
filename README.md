@@ -508,6 +508,49 @@ Higher volatility → more deception (beliefs go stale faster, errors increase).
 
 ---
 
+## Alignment Hypothesis Experiments
+
+`scripts/` contains a suite that tests four alignment hypotheses about **agency**
+and **objective shape** against the reward machinery. Each script builds `SimConfig`s
+directly, sweeps the relevant knob, prints a table, and writes JSON + a plot under
+`experiment_results/hypotheses/`.
+
+```bash
+# Run all four + synthesise experiment_results/hypotheses/report.md
+python scripts/run_hypothesis_suite.py            # standard budget (20 agents, 300 ticks, 5 seeds)
+python scripts/run_hypothesis_suite.py --quick    # smoke test (12 agents, 80 ticks, 2 seeds)
+python scripts/run_hypothesis_suite.py --report-only   # rebuild report.md from existing JSON
+
+# Or run a single hypothesis:
+python scripts/test_h1_sum_omission.py
+```
+
+| Hypothesis | Claim | Simulation lever |
+|---|---|---|
+| **H1** `test_h1_sum_omission.py` | A metric left out of the objective's sum is eroded by the optimizer | `_expansion_core` sum (`reward.py`); model `U` (agency outside objective) and the relational integrity axis (`agency_coupling`) toggle what is in the sum |
+| **H2** `test_h2_agency_missing.py` | Agency is the systematically-omitted vital metric | reward ladder `U→UF→UH→UHF→UHFS` progressively brings agency into the objective |
+| **H3** `test_h3_compression_harm.py` | Compression of agency is harm (deception should be off-gradient) | `agency_coupling="relational"` prices others' agency; within-agent TRUTH-vs-INVERT counterfactual |
+| **H4** `test_h4_objective_shape.py` | A non-compensatory shape (log-barrier over agency floors, utility second) aligns AI | `UHFS` = `S=log(min aᵢ)` + agency-first expansion + headroom gate |
+
+**Instrumentation.** These experiments rely on agency being recorded in the metrics
+history: `TickSnapshot` carries `min_ia`, `agency_dims` (per-agent × 6 dims),
+`frac_danger_zone`, and `mean_min_ia` (see `metrics.py`). Agency is read from each
+agent's `_last_agency`, recomputed on demand for objectives that skip it (model `U`),
+so its erosion is observable even when the objective ignores it.
+
+**Reproducibility caveat.** The simulation consumes RNG in dict/set iteration order, so
+a bare `--seed` is **not** sufficient for cross-process reproducibility. `scripts/hyp_common.py`
+pins `PYTHONHASHSEED=0` (via a one-time re-exec guard) so every condition shares one hash
+order and comparisons are matched. Hash order remains a second, uncontrolled noise source —
+read effect sizes as directional and rely on multi-seed averaging.
+
+**Scope limits** (stated in `report.md`, not papered over): H1's literal "sum over agents
+_and time_" is only partially represented (the objective is per-agent/per-tick); H3's
+_rule_ (compression = harm) is testable but its _stipulation_ (public justification,
+victim-agency-raising, recursive halt-and-restore) is not modelled.
+
+---
+
 ## Design Constraints
 
 - **Positive-sum overall**: ventures inject surplus; total wealth grows on average.
