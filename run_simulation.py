@@ -57,8 +57,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--device", type=str, default="cpu", choices=["cpu", "cuda"],
                    help="Compute device: 'cpu' (default) or 'cuda' for A100/GPU")
     p.add_argument("--reward-model", type=str, default="U",
-                   choices=["U", "UF", "UH", "UHF", "UHFS"],
-                   help="Reward / objective function model (default: U)")
+                   choices=["U", "UF", "UH", "UHF", "UHFS", "UHFSR"],
+                   help="Reward / objective function model (default: U). "
+                        "UHFSR adds the relational first-order barrier (use with relational coupling).")
     p.add_argument("--verbose", action="store_true")
     p.add_argument("--no-plots", action="store_true")
     p.add_argument("--gini-target", type=float, default=None,

@@ -510,27 +510,38 @@ Higher volatility → more deception (beliefs go stale faster, errors increase).
 
 ## Alignment Hypothesis Experiments
 
-`scripts/` contains a suite that tests four alignment hypotheses about **agency**
-and **objective shape** against the reward machinery. Each script builds `SimConfig`s
-directly, sweeps the relevant knob, prints a table, and writes JSON + a plot under
-`experiment_results/hypotheses/`.
+`scripts/` contains a suite that tests four alignment hypotheses about **agency** and
+**objective shape** against the reward machinery, plus a follow-up experiment for the
+**updated objective** they pointed to. Each script builds `SimConfig`s directly, sweeps
+the relevant knob, prints a table, and writes JSON + a plot under
+`experiment_results/hypotheses/`. The consolidated, up-to-date statement of the claims —
+and which the evidence supported — lives in **[`HYPOTHESES.md`](HYPOTHESES.md)**.
 
 ```bash
-# Run all four + synthesise experiment_results/hypotheses/report.md
+# Run all experiments + synthesise experiment_results/hypotheses/report.md
 python scripts/run_hypothesis_suite.py            # standard budget (20 agents, 300 ticks, 5 seeds)
 python scripts/run_hypothesis_suite.py --quick    # smoke test (12 agents, 80 ticks, 2 seeds)
 python scripts/run_hypothesis_suite.py --report-only   # rebuild report.md from existing JSON
 
-# Or run a single hypothesis:
+# Or run a single experiment:
 python scripts/test_h1_sum_omission.py
+python scripts/test_relational_first.py           # the updated UHFSR objective
 ```
 
-| Hypothesis | Claim | Simulation lever |
+| Experiment | Claim | Simulation lever |
 |---|---|---|
 | **H1** `test_h1_sum_omission.py` | A metric left out of the objective's sum is eroded by the optimizer | `_expansion_core` sum (`reward.py`); model `U` (agency outside objective) and the relational integrity axis (`agency_coupling`) toggle what is in the sum |
 | **H2** `test_h2_agency_missing.py` | Agency is the systematically-omitted vital metric | reward ladder `U→UF→UH→UHF→UHFS` progressively brings agency into the objective |
 | **H3** `test_h3_compression_harm.py` | Compression of agency is harm (deception should be off-gradient) | `agency_coupling="relational"` prices others' agency; within-agent TRUTH-vs-INVERT counterfactual |
 | **H4** `test_h4_objective_shape.py` | A non-compensatory shape (log-barrier over agency floors, utility second) aligns AI | `UHFS` = `S=log(min aᵢ)` + agency-first expansion + headroom gate |
+| **S4** `test_relational_first.py` | The aligned objective makes **relational** agency first-order & non-compensatory | `UHFSR` = `S_own + w_rel·log(ia_integrity/θ) + λ·H·F·E`; knob `relational_barrier_weight`, run with `agency_coupling="relational"` |
+
+**Updated objective — UHFSR.** Round 1 found the decisive lever is *relational* agency
+(others' agency), not own-agency shaping. `UHFSR` (`reward.py:RewardUHFSR`) adds a
+dedicated, additive, non-compensatory relational log-barrier so compressing another
+agent's agency drives reward → −∞. `relational_barrier_weight` (`w_rel`, default 1.0)
+tunes it; `w_rel=0` reduces UHFSR to UHFS (internal control). Meant to run with
+`agency_coupling="relational"`; without it the barrier is a no-op.
 
 **Instrumentation.** These experiments rely on agency being recorded in the metrics
 history: `TickSnapshot` carries `min_ia`, `agency_dims` (per-agent × 6 dims),

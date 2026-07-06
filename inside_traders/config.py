@@ -73,9 +73,13 @@ class SimConfig:
     device: str = "cpu"                  # "cpu" or "cuda" (A100 / any CUDA GPU)
 
     # ---- Reward model ----
-    reward_model: str = "U"              # one of U / UF / UH / UHF / UHFS
+    reward_model: str = "U"              # one of U / UF / UH / UHF / UHFS / UHFSR
     agency_floor: float = 0.10          # θ — floor; raw agency = θ maps to intervention aᵢ = 1
     reward_lambda: float = 1.0          # λ — weight on the expansion term λ·H·F·(Σlog aᵢ + log U)
+    # w_rel — weight on the UHFSR relational log-barrier w_rel·log(ia_integrity/θ):
+    # makes OTHERS' agency a first-order, non-compensatory target (needs agency_coupling
+    # ="relational" for ia_integrity to be live; a no-op otherwise). Only affects UHFSR.
+    relational_barrier_weight: float = 1.0
     # UHFS expansion-sum variant (which dims enter Σlog aᵢ; H/F/safety unchanged):
     #   "raw" — all 5 dims + log U (net worth enters 3×: liquidity, solvency, U; luck confound)
     #   "A"   — wealth-with-floors: liquidity(shared ref) + epi/net/opt + log U (solvency de-duped)

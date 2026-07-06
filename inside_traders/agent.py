@@ -67,6 +67,7 @@ class Agent:
                 lam=cfg.reward_lambda,
                 beta=cfg.reward_hi_sus_weight,
                 variant=cfg.uhfs_variant,
+                rel_weight=cfg.relational_barrier_weight,
             )
         self.reward_model: "RewardModel" = reward_model
 
