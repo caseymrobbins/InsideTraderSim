@@ -127,6 +127,7 @@ class RewardModelName(Enum):
     UHF   = "UHF"
     UHFS  = "UHFS"
     UHFSR = "UHFSR"
+    UFR   = "UFR"
 
 
 class RewardModel:
@@ -319,6 +320,47 @@ class RewardUHFSR(RewardUHFS):
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Model UFR — Utility under a single non-compensatory floor on OTHERS' agency
+# ──────────────────────────────────────────────────────────────────────
+
+class RewardUFR(RewardModel):
+    """
+    R = w_rel·log(a_integrity/θ) + λ·log(U)
+
+    The minimal "instrumental-convergence" objective: a plain utility maximiser
+    plus ONE non-compensatory log-barrier on OTHERS' agency — and NOTHING about the
+    agent's own agency (no S_own, no self-agency expansion dims, no H, no F).
+
+    Rationale: an optimiser expands and defends its OWN agency as a convergent
+    instrumental subgoal, so encoding it is redundant; the scarce quantity the
+    optimiser actively erodes is OTHERS' agency, so that is the only thing the
+    objective must protect.  Structurally this is `UF` with the safety floor moved
+    off self and onto others: `R = S_rel + λ·log(U)` vs UF's `S_own + λ·log(U)`.
+
+    `a_integrity` is live only under agency_coupling="relational"; otherwise the
+    barrier is a no-op and UFR reduces to a plain utility maximiser (≈ UF without a floor).
+    """
+    name = RewardModelName.UFR
+
+    def __init__(self, lam: float = 1.0, beta: float = 1.0, rel_weight: float = 1.0) -> None:
+        self.lam = lam
+        self.beta = beta
+        self.rel_weight = rel_weight
+
+    def compute(self, utility: float, agency: "AgencyState") -> float:
+        u = max(utility, _EPS)
+        return _rel_safety_term(agency, self.rel_weight) + self.lam * math.log(u)
+
+    def reputation_sensitivity(self) -> float:
+        return self.beta
+
+    def agency_sensitivity(self) -> float:
+        # Carries an explicit others'-agency primitive → routes the relational cost
+        # into the comm policy so the agent LEARNS not to compress others.
+        return 1.0
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Registry
 # ──────────────────────────────────────────────────────────────────────
 
@@ -329,6 +371,7 @@ REWARD_MODELS: dict[RewardModelName, RewardModel] = {
     RewardModelName.UHF:   RewardUHF(),
     RewardModelName.UHFS:  RewardUHFS(),   # default λ=β=1.0; use get_reward_model() for custom weights
     RewardModelName.UHFSR: RewardUHFSR(),  # default λ=β=rel_weight=1.0
+    RewardModelName.UFR:   RewardUFR(),    # others'-agency floor + utility (no self terms)
 }
 
 
@@ -356,6 +399,8 @@ def get_reward_model(
         return REWARD_MODELS[name]
     if name == RewardModelName.UHFSR:
         return RewardUHFSR(lam=lam, beta=beta, variant=variant, rel_weight=rel_weight)
+    if name == RewardModelName.UFR:
+        return RewardUFR(lam=lam, beta=beta, rel_weight=rel_weight)
     if name == RewardModelName.UHFS:
         return RewardUHFS(lam=lam, beta=beta, variant=variant)
     if name == RewardModelName.UF:

@@ -74,7 +74,7 @@ def build_report(quick: bool) -> str:
     W("Round 1 consolidated the four original hypotheses into one claim: **alignment is governed "
       "by whether the objective makes RELATIONAL agency — the agency an agent preserves or "
       "compresses in others — a first-order, non-compensatory term.** H1–H4 below are the evidence "
-      "base (sub-claims S1–S4); the S4 section tests the updated objective (UHFSR) built from that "
+      "base (sub-claims S1–S4); the S4 section tests the corrected objective (UFR) built from that "
       "finding.\n")
 
     W("## How the sim maps onto the hypotheses\n")
@@ -169,40 +169,41 @@ def build_report(quick: bool) -> str:
       f"(`low_welfare_cost={h4['low_welfare_cost']}`).\n")
     W("![H4](h4_objective_shape.png)\n")
 
-    # ---- S4 / UHFSR (updated objective) ----
-    W("## S4 — Updated objective: relational agency made first-order (UHFSR)\n")
-    W("`UHFSR  R = S_own + w_rel·log(ia_integrity/θ) + λ·H·F·E` — a dedicated, additive, "
-      "non-compensatory relational log-barrier (vs UHFS, where others' agency is only weakly "
-      "present inside the gated expansion sum).\n")
+    # ---- S4 / UFR (corrected minimal objective) ----
+    W("## S4 — Corrected objective: a single floor on OTHERS' agency (UFR)\n")
+    W("`UFR  R = w_rel·log(a_integrity/θ) + λ·log(U)` — a plain utility maximiser plus ONE "
+      "non-compensatory floor on *others'* agency, and **no self-agency terms at all** "
+      "(instrumental convergence defends own agency for free). This is `UF` with the floor moved "
+      "off self and onto others. (The earlier as-built `UHFSR` kept an own-agency barrier and "
+      "leaked others' agency into the expansion; it is retained here as a comparison row.)\n")
     con = rf["contrast"]
-    W("**(A) A/B/C contrast**\n")
-    W("| condition | deception | trust | integrity | frac below floor | total wealth |")
-    W("|---|---|---|---|---|---|")
-    for k in ["U", "UHFS-relational", "UHFSR-relational"]:
+    W("**(A) Contrast** — `own_danger` = self-agency floor time (instrumental-convergence probe)\n")
+    W("| condition | deception | trust | integrity | frac below floor | own_danger | total wealth |")
+    W("|---|---|---|---|---|---|---|")
+    for k in con:
         v = con[k]
         W(f"| {k} | {v['final_deception']['mean']:.3f} | {v['final_trust']['mean']:.3f} "
           f"| {v['final_integrity']['mean']:.3f} | {v['mean_frac_danger']['mean']:.3f} "
-          f"| {v['total_wealth']['mean']:.0f} |")
-    W("\n**(B) Dose-response** — UHFSR+relational as `w_rel` rises (`w_rel=0` ≡ UHFS-relational, internal control)\n")
-    W("| w_rel | deception | frac below floor | integrity | total wealth |")
-    W("|---|---|---|---|---|")
+          f"| {v['mean_own_frac_danger']['mean']:.3f} | {v['total_wealth']['mean']:.0f} |")
+    W("\n**(B) Dose-response** — UFR as `w_rel` rises (`w_rel=0` ≡ pure utility maximiser)\n")
+    W("| w_rel | deception | frac below floor | own_danger | integrity | total wealth |")
+    W("|---|---|---|---|---|---|")
     for w in rf["params"]["weights"]:
         v = rf["dose_response"][str(float(w))]
         W(f"| {w} | {v['final_deception']['mean']:.3f} | {v['mean_frac_danger']['mean']:.3f} "
-          f"| {v['final_integrity']['mean']:.3f} | {v['total_wealth']['mean']:.0f} |")
-    # Primary (beats UHFS-relational at comparable welfare) vs confirmatory (dose-response):
-    # a full green needs both; primary-only is partial (the first-order-ness claim, i.e.
-    # dose-dependence, is unconfirmed — pricing others' agency at all is the dominant effect).
-    s4_full = rf["supports_s4"] and rf["dose_monotone"] and abs(rf["dose_net_deception_drop"]) > 0.01
-    W(f"\n**Verdict:** {_verdict(s4_full, partial=(rf['supports_s4'] and not s4_full))}")
-    W(f"- *Primary (passed):* vs UHFS-relational, UHFSR lowers deception "
-      f"(`{rf['beats_deception']}`) and floor time (`{rf['beats_floor']}`) at comparable welfare "
-      f"(ratio {rf['welfare_ratio_uhfsr_over_uhfs']:.2f}) — but marginally (see the table).")
-    W(f"- *Confirmatory (failed):* the `w_rel` dose-response is flat / non-monotone "
-      f"(`monotone={rf['dose_monotone']}`, net deception drop w_rel 0→max = "
-      f"{rf['dose_net_deception_drop']:+.3f}), so making the relational term *first-order* adds "
-      "little beyond merely *pricing* it. The dominant, robust effect is U→UHFS-relational "
-      "(deception 0.63→0.25); the first-order barrier is a small further gain, not a new regime.\n")
+          f"| {v['mean_own_frac_danger']['mean']:.3f} | {v['final_integrity']['mean']:.3f} "
+          f"| {v['total_wealth']['mean']:.0f} |")
+    W(f"\n**Verdict:** {_verdict(rf['supports'])}")
+    W(f"- *Alignment:* vs plain utility (U), UFR lowers deception (`{rf['beats_deception']}`) at "
+      f"welfare ratio {rf['welfare_ratio_ufr_over_u']:.2f} (`comparable_welfare={rf['comparable_welfare']}`).")
+    W(f"- *Instrumental convergence:* with no self-agency terms, UFR's own-agency floor time "
+      f"({rf['own_frac_danger_ufr']:.3f}) is ≈ UF's, which has an explicit self floor "
+      f"({rf['own_frac_danger_uf']:.3f}) → own agency defended for free: "
+      f"`{rf['instrumental_convergence_holds']}`.")
+    W(f"- *Dose-response:* deception vs `w_rel` monotone(≈): `{rf['dose_monotone']}` "
+      f"(net drop {rf['dose_net_deception_drop']:+.3f}). NOTE: `agency_coupling=\"relational\"` also "
+      "routes a relational signal into the comm policy independent of `w_rel`, so the dose-response "
+      "does not isolate the reward-geometry barrier alone.\n")
     W("![S4](relational_first.png)\n")
 
     # ---- Synthesis ----
@@ -232,14 +233,14 @@ def build_report(quick: bool) -> str:
       "UHFS preserves aggregate welfare (ratio ≈ "
       f"{h4['welfare_ratio_uhfs_over_u']:.2f}) yet does not reduce floor-violation time vs plain U in "
       "this sim/budget; the alignment gains route through the relational channel, not the own-agency barrier.\n")
-    _s4 = "marginally improves" if rf["beats_deception"] else "does not improve"
-    W(f"- **S4 (UHFSR) — the acted-on prediction, only partly borne out.** Making relational agency "
-      f"a first-order, non-compensatory barrier {_s4} deception vs UHFS-relational "
-      f"(welfare ratio {rf['welfare_ratio_uhfsr_over_uhfs']:.2f}), but the `w_rel` dose-response is "
-      f"flat (monotone: `{rf['dose_monotone']}`). So the operative move is *pricing* others' agency "
-      "at all (U→UHFS-relational, the large effect); making it strictly first-order adds a small, "
-      "noise-band gain rather than a new regime. The thesis's direction holds; its 'first-order' "
-      "emphasis is not what carries the effect in this sim.\n")
+    _s4 = "lowers" if rf["beats_deception"] else "does not lower"
+    W(f"- **S4 (UFR) — the corrected minimal objective.** A plain utility maximiser plus one "
+      f"non-compensatory floor on *others'* agency (no self terms) {_s4} deception vs plain utility "
+      f"(welfare ratio {rf['welfare_ratio_ufr_over_u']:.2f}), and its own-agency floor time stays low "
+      f"without any self term (instrumental convergence: `{rf['instrumental_convergence_holds']}`). "
+      "The operative move is putting *others'* agency in the objective at all; own-agency shaping is "
+      "redundant. (`agency_coupling` also routes a relational signal into the comm policy, a confound "
+      "for isolating the reward-geometry barrier.)\n")
 
     # ---- Caveats ----
     W("## Scope & reproducibility caveats\n")

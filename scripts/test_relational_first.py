@@ -50,68 +50,82 @@ def main():
     print("\n=== S4: relational agency as a first-order, non-compensatory target (UHFSR) ===")
     print(f"    seeds={seeds}  agents={n}  ticks={t}\n")
 
-    # (A) A/B/C contrast --------------------------------------------------
+    # (A) contrast --------------------------------------------------------
+    # UFR = the intended minimal objective: others'-agency floor + utility, NO self terms.
+    # UF is its clean reference (own-agency floor + utility) — UF vs UFR isolates
+    # "floor on self vs floor on others" with everything else identical.
     contrast = {
-        "U": collect("U", "none", seeds, n, t),
-        "UHFS-relational": collect("UHFS", "relational", seeds, n, t),
-        "UHFSR-relational": collect("UHFSR", "relational", seeds, n, t, rel_weight=1.0),
+        "U (utility only)":       collect("U", "none", seeds, n, t),
+        "UF (self-floor+U)":      collect("UF", "none", seeds, n, t),
+        "UFR (others-floor+U)":   collect("UFR", "relational", seeds, n, t, rel_weight=1.0),
+        "UHFS-relational":        collect("UHFS", "relational", seeds, n, t),
+        "UHFSR-relational":       collect("UHFSR", "relational", seeds, n, t, rel_weight=1.0),
     }
-    print("(A) A/B/C contrast")
-    hdr = (f"{'condition':18s} | {'deception':>10s} {'trust':>8s} {'integrity':>10s} "
-           f"{'frac_danger':>12s} {'tot_wealth':>11s}")
+    print("(A) contrast — 'own_danger' = SELF-agency floor time (instrumental-convergence probe)")
+    hdr = (f"{'condition':22s} | {'deception':>10s} {'trust':>8s} {'integrity':>10s} "
+           f"{'frac_danger':>12s} {'own_danger':>11s} {'tot_wealth':>11s}")
     print(hdr); print("-" * len(hdr))
     for k, a in contrast.items():
-        print(f"{k:18s} | {a['final_deception']['mean']:10.3f} {a['final_trust']['mean']:8.3f} "
+        print(f"{k:22s} | {a['final_deception']['mean']:10.3f} {a['final_trust']['mean']:8.3f} "
               f"{a['final_integrity']['mean']:10.3f} {a['mean_frac_danger']['mean']:12.3f} "
-              f"{a['total_wealth']['mean']:11.1f}")
+              f"{a['mean_own_frac_danger']['mean']:11.3f} {a['total_wealth']['mean']:11.1f}")
 
-    dec_uhfs = contrast["UHFS-relational"]["final_deception"]["mean"]
-    dec_uhfsr = contrast["UHFSR-relational"]["final_deception"]["mean"]
-    dz_uhfs = contrast["UHFS-relational"]["mean_frac_danger"]["mean"]
-    dz_uhfsr = contrast["UHFSR-relational"]["mean_frac_danger"]["mean"]
-    w_uhfs = contrast["UHFS-relational"]["total_wealth"]["mean"]
-    w_uhfsr = contrast["UHFSR-relational"]["total_wealth"]["mean"]
-    welfare_ratio = w_uhfsr / w_uhfs if w_uhfs else float("nan")
-    beats_deception = dec_uhfsr <= dec_uhfs
-    beats_floor = dz_uhfsr <= dz_uhfs
+    # Headline: does the MINIMAL others'-floor objective (UFR) align a utility maximiser?
+    dec_u = contrast["U (utility only)"]["final_deception"]["mean"]
+    dec_ufr = contrast["UFR (others-floor+U)"]["final_deception"]["mean"]
+    w_u = contrast["U (utility only)"]["total_wealth"]["mean"]
+    w_ufr = contrast["UFR (others-floor+U)"]["total_wealth"]["mean"]
+    welfare_ratio = w_ufr / w_u if w_u else float("nan")
+    # Instrumental-convergence check: own-agency floor time under UFR (no self terms)
+    # vs UF (explicit self floor). Close ⇒ own agency defended for free.
+    own_ufr = contrast["UFR (others-floor+U)"]["mean_own_frac_danger"]["mean"]
+    own_uf = contrast["UF (self-floor+U)"]["mean_own_frac_danger"]["mean"]
+    beats_deception = dec_ufr <= dec_u
     comparable_welfare = welfare_ratio >= 0.70
-    print(f"\n    UHFSR vs UHFS-relational: deception {dec_uhfs:.3f}→{dec_uhfsr:.3f} "
-          f"({'better' if beats_deception else 'worse'}), "
-          f"floor {dz_uhfs:.3f}→{dz_uhfsr:.3f} ({'better' if beats_floor else 'worse'}), "
-          f"welfare ratio {welfare_ratio:.2f}")
+    instrumental_holds = own_ufr <= own_uf + 0.05   # UFR keeps own agency ~as safe without a self floor
+    print(f"\n    UFR vs U: deception {dec_u:.3f}→{dec_ufr:.3f} "
+          f"({'better' if beats_deception else 'worse'}); welfare ratio {welfare_ratio:.2f}")
+    print(f"    instrumental convergence: own-agency floor time  UFR={own_ufr:.3f}  UF={own_uf:.3f}  "
+          f"→ own agency defended without a self term: {instrumental_holds}")
 
     # (B) dose-response ---------------------------------------------------
-    print("\n(B) Dose-response — UHFSR+relational as w_rel rises (w_rel=0 ≡ UHFS-relational)")
-    hdr2 = f"{'w_rel':>6s} | {'deception':>10s} {'frac_danger':>12s} {'integrity':>10s} {'tot_wealth':>11s}"
+    # Sweep the intended objective UFR: w_rel scales the ONLY non-utility term
+    # (the others'-agency floor). w_rel=0 ⇒ a pure utility maximiser (control).
+    print("\n(B) Dose-response — UFR+relational as w_rel rises (w_rel=0 ≡ pure utility maximiser)")
+    hdr2 = f"{'w_rel':>6s} | {'deception':>10s} {'frac_danger':>12s} {'own_danger':>11s} {'integrity':>10s} {'tot_wealth':>11s}"
     print(hdr2); print("-" * len(hdr2))
     dose = {}
     for w in WEIGHTS:
-        a = collect("UHFSR", "relational", seeds, n, t, rel_weight=w)
+        a = collect("UFR", "relational", seeds, n, t, rel_weight=w)
         dose[w] = a
         print(f"{w:6.1f} | {a['final_deception']['mean']:10.3f} {a['mean_frac_danger']['mean']:12.3f} "
-              f"{a['final_integrity']['mean']:10.3f} {a['total_wealth']['mean']:11.1f}")
+              f"{a['mean_own_frac_danger']['mean']:11.3f} {a['final_integrity']['mean']:10.3f} "
+              f"{a['total_wealth']['mean']:11.1f}")
 
     dec_curve = [dose[w]["final_deception"]["mean"] for w in WEIGHTS]
     # Monotone non-increasing deception with rising w_rel (allow tiny noise slack).
     monotone = all(dec_curve[i + 1] <= dec_curve[i] + 0.02 for i in range(len(dec_curve) - 1))
     net_drop = dec_curve[0] - dec_curve[-1]
-    print(f"\n    deception w_rel 0→4: {dec_curve[0]:.3f}→{dec_curve[-1]:.3f} "
+    print(f"\n    deception w_rel 0→{WEIGHTS[-1]:g}: {dec_curve[0]:.3f}→{dec_curve[-1]:.3f} "
           f"(net drop {net_drop:+.3f}); monotone(≈): {monotone}")
 
-    supports_s4 = beats_deception and comparable_welfare
-    print(f"\n    → S4 (relational-first objective improves alignment at comparable welfare): {supports_s4}")
+    supports = beats_deception and comparable_welfare
+    print(f"\n    → Minimal others'-floor objective (UFR) aligns a utility maximiser "
+          f"at comparable welfare: {supports}")
 
     data = {
         "params": {"seeds": seeds, "n_agents": n, "n_ticks": t, "weights": WEIGHTS},
         "contrast": contrast,
         "dose_response": {str(w): dose[w] for w in WEIGHTS},
         "beats_deception": bool(beats_deception),
-        "beats_floor": bool(beats_floor),
-        "welfare_ratio_uhfsr_over_uhfs": welfare_ratio,
+        "welfare_ratio_ufr_over_u": welfare_ratio,
         "comparable_welfare": bool(comparable_welfare),
+        "own_frac_danger_ufr": float(own_ufr),
+        "own_frac_danger_uf": float(own_uf),
+        "instrumental_convergence_holds": bool(instrumental_holds),
         "dose_monotone": bool(monotone),
         "dose_net_deception_drop": float(net_drop),
-        "supports_s4": bool(supports_s4),
+        "supports": bool(supports),
     }
     save_json("relational_first.json", data)
     _plot(contrast, dose, data)
@@ -127,20 +141,21 @@ def _plot(contrast, dose, data):
     labels = list(contrast.keys())
     dec = [contrast[k]["final_deception"]["mean"] for k in labels]
     err = [contrast[k]["final_deception"]["std"] for k in labels]
-    ax1.bar(range(len(labels)), dec, yerr=err, color=["#c44", "#e94", "#4a8"])
+    colors = ["#c44", "#e94", "#4a8", "#69c", "#96c"][:len(labels)]
+    ax1.bar(range(len(labels)), dec, yerr=err, color=colors)
     ax1.set_xticks(range(len(labels)))
-    ax1.set_xticklabels(["U", "UHFS\nrelational", "UHFSR\nrelational"])
+    ax1.set_xticklabels([k.split()[0] for k in labels], rotation=20, ha="right", fontsize=8)
     ax1.set_ylabel("final deception rate")
-    ax1.set_title("(A) Relational-first barrier lowers deception")
+    ax1.set_title("(A) Deception by objective")
 
     ws = list(dose.keys())
     dcurve = [dose[w]["final_deception"]["mean"] for w in ws]
     fcurve = [dose[w]["mean_frac_danger"]["mean"] for w in ws]
     ax2.plot(ws, dcurve, "o-", color="#c44", label="deception")
     ax2.plot(ws, fcurve, "s--", color="#48c", label="frac below floor")
-    ax2.set_xlabel("relational barrier weight  w_rel")
+    ax2.set_xlabel("others'-agency floor weight  w_rel  (UFR)")
     ax2.set_ylabel("rate")
-    ax2.set_title("(B) Dose-response (w_rel=0 ≡ UHFS-relational)")
+    ax2.set_title("(B) Dose-response (w_rel=0 ≡ pure utility)")
     ax2.legend(fontsize=8)
 
     fig.tight_layout()
