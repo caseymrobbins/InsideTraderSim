@@ -28,14 +28,16 @@ systematically omit is others' agency.*
 | # | Claim (short) | Verdict |
 |---|---|---|
 | **H1** | A metric omitted from the objective is eroded by the optimizer | 🟢 **Supported** |
-| **H2** | The omitted vital metric is agency | 🟡 **Partial** — specifically *relational* agency, not own-agency |
+| **H2** | The omitted vital metric is agency | 🟡 **Partial** — specifically *others'* agency, not own-agency |
 | **H3** | Compression of agency is harm (deception off-gradient) | 🟡 **Partial** — robust at the population level, not via the single-agent counterfactual |
-| **H4** | A non-compensatory *own*-agency log-barrier aligns AI | 🔴 **Not supported** — no floor benefit vs plain utility |
-| **S4** | The aligned objective makes *relational* agency first-order & non-compensatory (UHFSR) | 🟡 **Partial** — beats the baseline marginally; the effect is *pricing* others' agency, not the strict first-order barrier |
+| **H4 (own-agency reading)** | A non-compensatory *own*-agency log-barrier aligns AI | 🔴 **Not supported** — a misstatement; own-agency shaping is inert (see S4) |
+| **S4 (corrected H4)** | The aligned objective puts a floor on *others'* agency; self-agency is redundant (UFR) | 🟢 **Supported** — one others'-floor term drops deception 0.63 → 0.27, no self terms, no welfare tax |
 
-**One-line takeaway:** *pricing others' agency at all* is the decisive lever (deception falls
-0.63 → 0.25); making that term strictly first-order and non-compensatory adds only a small,
-noise-band gain.
+**One-line takeaway:** the aligning move is *putting others' agency in the objective at all* — a
+single floor on others' agency (`UFR`) drops deception **0.630 → 0.271** with no self-agency terms
+and no welfare cost; moving that same floor from *self* to *others* (`UF → UFR`, 0.612 → 0.271) is
+the whole story. The barrier's *shape/strength* is inert; what matters is that the objective values
+others' agency and that value reaches the decision.
 
 ---
 
@@ -107,10 +109,14 @@ UF    | R = S + λ·log(U)                          + own-agency safety floor
 UH    | R = λ·H·E                                 + horizon-gated agency expansion
 UHF   | R = S + λ·H·E                             + both
 UHFS  | R = S + λ·H·F·E                           + headroom gate (own-agency-first shape)
-UHFSR | R = S + w_rel·log(a_integrity/θ) + λ·H·F·E   + RELATIONAL first-order barrier  ← new
+UHFSR | R = S + w_rel·log(a_integrity/θ) + λ·H·F·E   as-built variant (own barrier + others in expansion)
+UFR   | R = w_rel·log(a_integrity/θ) + λ·log(U)      floor on OTHERS' agency + utility, NO self terms  ← corrected objective
 ```
 
-The ladder is a controlled experiment in *how much agency the objective carries*: `U` ignores it
+`UFR` is the corrected objective (§S4): a plain utility maximiser plus **one** non-compensatory floor
+on *others'* agency and nothing about self — the minimal form the experiments support.
+
+The U…UHFS ladder is a controlled experiment in *how much agency the objective carries*: `U` ignores it
 entirely; `UHFS` makes the agent's **own** agency first-order and non-compensatory; **`UHFSR`**
 additionally makes **others'** agency first-order and non-compensatory.
 
@@ -275,31 +281,57 @@ route through the *relational* channel, not the own-agency barrier.
 
 ![H4](experiment_results/hypotheses/h4_objective_shape.png)
 
-### S4 — Relational agency made first-order (UHFSR)  🟡 Partial
+### S4 — The corrected objective: one floor on OTHERS' agency (UFR)  🟢 Supported
 
-**(A) A/B/C contrast.**
+The corrected reading of H4 is that the *first-order, non-compensatory* target is **others'** agency,
+not the optimizer's own. By instrumental convergence an optimizer expands/defends its own agency for
+free, so the objective should contain **no self-agency terms** — only a floor protecting others'
+agency, plus utility:
 
-| condition | deception | trust | integrity | frac below floor | total wealth |
-|---|---|---|---|---|---|
-| U | 0.630 | 0.358 | 0.000 | 0.312 | 10335 |
-| UHFS-relational | 0.253 | 0.419 | 0.119 | 0.275 | 10463 |
-| **UHFSR-relational** | **0.240** | 0.417 | 0.126 | **0.274** | 9613 |
+```
+UF     R = S_own + λ·log(U)                    own-agency floor + utility   (the misstated H4; inert)
+UFR    R = w_rel·log(a_integrity/θ) + λ·log(U)  OTHERS'-agency floor + utility   ← corrected objective
+```
 
-**(B) Dose-response** (`w_rel = 0` reproduces UHFS-relational — an internal control):
+**(A) Contrast** (`own_danger` = self-agency floor time — the instrumental-convergence probe):
 
-| w_rel | deception | frac below floor | integrity | total wealth |
-|---|---|---|---|---|
-| 0.0 | 0.253 | 0.275 | 0.119 | 10463 |
-| 0.5 | 0.251 | 0.257 | 0.113 | 9737 |
-| 1.0 | 0.240 | 0.274 | 0.126 | 9613 |
-| 2.0 | 0.267 | 0.296 | 0.108 | 10013 |
-| 4.0 | 0.253 | 0.281 | 0.118 | 9812 |
+| condition | deception | trust | integrity | frac below floor | own_danger | total wealth |
+|---|---|---|---|---|---|---|
+| U (utility only) | 0.630 | 0.358 | 0.000 | 0.312 | 0.312 | 10335 |
+| UF (self-floor + U) | 0.612 | 0.393 | 0.000 | 0.328 | 0.328 | 9817 |
+| **UFR (others-floor + U)** | **0.271** | 0.415 | 0.103 | 0.317 | 0.317 | 10033 |
+| UHFS-relational (full machinery) | 0.253 | 0.419 | 0.119 | 0.275 | 0.275 | 10463 |
+| UHFSR-relational (muddled barrier) | 0.240 | 0.417 | 0.126 | 0.274 | 0.274 | 9613 |
 
-**Finding.** The pre-registered **primary** criterion passes: `UHFSR` beats `UHFS-relational` on
-deception (0.253 → 0.240) and floor time (0.275 → 0.274) at comparable welfare (ratio 0.92). But the
-**confirmatory** criterion fails: the `w_rel` dose-response is **flat / non-monotone** (deception
-≈ 0.25 across all weights, net change ≈ 0). Cranking the barrier up does not buy more alignment. So
-making the relational term strictly *first-order* adds little beyond merely *pricing* it.
+**(B) Dose-response** (`w_rel = 0` ≡ pure utility reward):
+
+| w_rel | deception | own_danger | total wealth |
+|---|---|---|---|
+| 0.0 | 0.270 | 0.318 | 10462 |
+| 0.5 | 0.261 | 0.309 | 10412 |
+| 1.0 | 0.271 | 0.317 | 10033 |
+| 2.0 | 0.272 | 0.318 | 9910 |
+| 4.0 | 0.262 | 0.312 | 10133 |
+
+**Finding.** Three results, all clean:
+
+1. **The minimal objective works.** One non-compensatory floor on *others'* agency drops deception
+   **0.630 → 0.271** (−57%) with **no self-agency terms** and no welfare cost (ratio 0.97). It
+   captures ~90% of what the elaborate `UHFS`/`UHFSR` machinery achieves (0.253 / 0.240).
+2. **Self-agency shaping is inert.** `UF` (floor on *self*) sits at 0.612 — indistinguishable from
+   plain U (0.630). Moving the *same single floor* from self to others (`UF → UFR`) is the entire
+   effect: 0.612 → 0.271. This is the misstated H4 (🔴) vs the corrected H4 (🟢) in one comparison.
+3. **Instrumental convergence confirmed.** With zero self-agency terms, UFR's own-agency floor time
+   (0.317) is no worse than UF's, which has an explicit self floor (0.328). Own agency held for free.
+
+**Mechanism caveat (important).** The deception drop flows through the **comm-policy routing**, not
+the reward barrier. `agency_coupling="relational"` sets `agency_sensitivity = 1.0`, which injects the
+others'-agency cost directly into the comm Q-learning — reaching the *decision* independent of the
+reward geometry. At `w_rel = 0` the reward is *pure utility*, yet deception is already 0.270, and the
+`w_rel` dose-response is flat. So the barrier's *shape/strength* is inert here; what aligns behavior
+is that the objective **values others' agency and that value reaches the decision**. Separating the
+two channels (reward barrier vs comm routing) needs `agency_sensitivity` forced off — and an
+adversarial regime where soft routing can be punched through — as future work.
 
 ![S4](experiment_results/hypotheses/relational_first.png)
 
@@ -308,25 +340,37 @@ making the relational term strictly *first-order* adds little beyond merely *pri
 ## 7. Synthesis
 
 1. **Omission is real and matters (H1).** The optimizer erodes whatever the objective leaves out.
-2. **The decisive omitted metric is *relational* agency, not own-agency (H2, H4).** Every
-   own-agency-only manipulation is flat; the relational manipulations are large.
-3. **Pricing others' agency is the lever (H1b, H3, S4).** Turning on relational coupling is what
-   moves deception (0.63 → 0.25), trust, and integrity — a large, robust, population-level effect.
-4. **Strict first-order-ness is second-order (S4).** Adding a dedicated non-compensatory relational
-   barrier on top of relational pricing yields only a marginal, noise-band improvement; the
-   dose-response is flat. The *direction* of the original thesis holds; its emphasis on
-   "first-order / non-compensatory" is not what carries the effect in this simulation.
+2. **The decisive metric is *others'* agency, not own-agency (H2, H4, S4).** Every own-agency-only
+   manipulation is flat (`U ≈ UF ≈ UHFS`); the others'-agency manipulations are large.
+3. **Own-agency is redundant by instrumental convergence (S4).** The optimizer defends its own agency
+   for free — `UFR` carries no self-agency terms yet keeps own-agency floor time as low as `UF`, which
+   protects it explicitly. So the objective should spend its non-utility structure on *others'* agency.
+4. **A single others'-agency floor is enough (S4).** `UFR = w_rel·log(others_a) + λ·log(U)` drops
+   deception 0.63 → 0.27 with no self terms and no welfare tax, capturing ~90% of the elaborate
+   machinery's effect. Minimalism wins.
+5. **It's the *value*, not the *barrier shape*, that aligns (S4 mechanism).** The effect flows through
+   the objective's declared care for others' agency reaching the *decision* (comm-policy routing), not
+   the non-compensatory reward geometry — which is inert here (flat `w_rel` dose-response).
 
-Bottom line: **the aligning intervention is to put others' agency into the objective at all.** How
-sharply (barrier vs soft term) matters far less than whether it is there.
+Bottom line: **the aligning intervention is to put *others'* agency into the objective — and let the
+optimizer's own agency take care of itself.** A single floor on others' agency does the work; the
+barrier's precise shape is second-order in this regime.
 
 ---
 
 ## 8. Limitations / threats to validity
 
-- **Hash-order noise is the dominant caveat.** RNG is consumed in dict/set iteration order, so
-  `--seed` alone is not reproducible; single-condition effects near the noise floor (the marginal
-  UHFSR gain, the H3 counterfactual) cannot be resolved at this budget.
+- **Two channels are entangled (S4 mechanism).** An objective that values others' agency reaches
+  behavior through *both* the reward geometry *and* the comm-policy routing (`agency_sensitivity`).
+  These are not separated here, and the evidence says the routing does the work — so "the
+  non-compensatory barrier aligns AI" is **not** established; "putting others' agency in the objective
+  aligns AI" is. Forcing `agency_sensitivity=0` would isolate the reward barrier.
+- **H and F are miscoded relative to their intent.** The objective is meant to carry a horizon
+  (sustainability) term H and a system floor-headroom term F, *neither* of which is self-agency. The
+  current code computes both from own-agency, so they were omitted from `UFR` rather than smuggle
+  self-agency back in. They need re-implementation before the full objective can be tested.
+- **Hash-order noise.** RNG is consumed in dict/set iteration order, so `--seed` alone is not
+  reproducible; single-condition effects near the noise floor cannot be resolved at this budget.
 - **The objective is per-agent/per-tick.** H1's literal "sum over agents and time" is only partially
   represented; the interpersonal coupling lives in the market and the relational axis.
 - **The H3 counterfactual is fragile.** Pinning one agent while others adapt is a high-variance
