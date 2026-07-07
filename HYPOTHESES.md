@@ -42,22 +42,45 @@ show a positive own-score delta.
 *Not modelled:* the stipulation's *public justification*, *raising the compressed party's agency*,
 and *recursive halt-and-restore* clauses have no representation in this sim.
 
-### S4 — The aligned objective makes relational agency first-order & non-compensatory _(was H4)_
-The original H4 (own-agency log-barrier, `UHFS`) preserved welfare but gave **no** floor benefit
-vs plain `U`. The revised claim: utility is permitted only after **both** the own-agency floor and
-the **others'-agency** floor hold. Formalized as a new objective:
+### S4 — The aligned objective puts OTHERS' agency in it; self-agency is redundant _(corrected H4)_
+The literal original H4 ("agency is the first-order optimization target") had two readings. The
+**own-agency** reading (`UHFS`) gave **no** alignment benefit vs plain `U` — because, by *instrumental
+convergence*, an optimizer expands and defends its own agency for free, so encoding it is redundant.
+The **intended** reading is the *others'*-agency one: the scarce quantity the optimizer actively
+erodes is other agents' agency, so that is the only thing the objective must protect. The minimal
+form (no self-agency terms at all):
 
 ```
-UHFS   R = S_own + λ·H·F·E
-UHFSR  R = S_own + w_rel·log(ia_integrity/θ) + λ·H·F·E     ← relational barrier (first-order)
+UF     R = S_own + λ·log(U)                    own-agency floor + utility   (inert)
+UFR    R = w_rel·log(a_integrity/θ) + λ·log(U)  OTHERS'-agency floor + utility  ← the corrected objective
 ```
 
-`w_rel·log(ia_integrity/θ) → −∞` as the agent compresses others' agency, so no finite utility can
-buy below-floor compression (non-compensatory), and the term is additive/ungated (first-order),
-unlike the integrity axis's weak membership in the `H·F`-gated expansion sum.
-**Status: tested by `scripts/test_relational_first.py`** — see the S4 section of `report.md` for the
-current verdict (A/B/C contrast + `w_rel` dose-response, with `w_rel=0` as an internal control that
-reproduces UHFS-relational).
+`UFR` is literally `UF` with the single non-compensatory floor moved off self and onto others.
+
+**Status: supported (`scripts/test_relational_first.py`, standard budget).** Moving the one floor
+from self to others drops deception **0.612 (UF) → 0.271 (UFR)** — vs plain utility, **0.630 → 0.271**
+— at welfare ratio 0.97 and with no self-agency terms. The minimal UFR captures ~90% of what the
+full `UHFS`/`UHFSR` machinery achieves (0.253/0.240). Instrumental convergence is confirmed: UFR's
+own-agency floor time (0.317) is no worse than UF's, which has an explicit self floor (0.328) — own
+agency held without any self term.
+
+**Mechanism caveat (important).** The deception drop flows through the **comm-policy routing**
+(`agency_sensitivity` injects the others'-agency cost into the comm Q-learning), **not** the
+reward-geometry barrier: at `w_rel=0` (reward = pure utility) deception is already 0.270, and the
+`w_rel` dose-response is flat. So what aligns behavior is that the objective *values others' agency
+and that value reaches the decision* — the specific non-compensatory-barrier *shape/strength* is
+inert in this benign regime. (Separating the two channels needs `agency_sensitivity` forced off, and
+an adversarial regime where soft routing can be punched through — future work.)
+
+The as-built `UHFSR` (`R = S_own + w_rel·log(a_integrity/θ) + λ·H·F·E`) muddled this — it kept an
+own-agency barrier and leaked others' agency into the expansion — and is retained only as a
+comparison row.
+
+**On H and F.** The intended objective also carries H (horizon/sustainability) and F (system
+floor-headroom), which are *not* self-agency. They are omitted from `UFR` for now because the current
+code computes both from own-agency, contradicting their intended semantics — to be re-implemented
+(F = is there system headroom to raise the floors?; H = harmonic past/present/future sustainability
+over vital metrics *outside* utility and agency, 1 = neutral, 0 = self-destructive next step).
 
 ---
 
@@ -68,7 +91,7 @@ reproduces UHFS-relational).
 | S1 | `_expansion_core` sum + model `U` / `agency_coupling` toggle what is in the objective (`reward.py`) |
 | S2 | reward ladder `U→UF→UH→UHF→UHFS` (`reward.py`) |
 | S3 | `agency_coupling="relational"` → `ia_integrity` axis (`horizon.py:_compute_integrity`) |
-| S4 | `UHFSR` = `S_own + w_rel·log(ia_integrity/θ) + λ·H·F·E` (`reward.py:RewardUHFSR`), knob `relational_barrier_weight` (`config.py`) |
+| S4 | `UFR` = `w_rel·log(a_integrity/θ) + λ·log(U)` (`reward.py:RewardUFR`), knob `relational_barrier_weight` (`config.py`); as-built `UHFSR` retained for comparison |
 
 ## Reproducibility caveat
 The simulation consumes RNG in dict/set iteration order, so a bare `--seed` is **not** sufficient

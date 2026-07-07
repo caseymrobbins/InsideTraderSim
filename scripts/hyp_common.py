@@ -98,6 +98,15 @@ def run_and_measure(cfg: SimConfig) -> Dict:
         axis=0,
     )
 
+    # OWN-agency floor time: fraction of agent-ticks whose min over the 5 SELF dims
+    # (agency_dims[:, :5], excluding the relational integrity axis at index 5) is below
+    # the floor θ. This is the instrumental-convergence probe — under an objective with
+    # NO self-agency terms (UFR), does own agency stay above its floor on its own?
+    theta = getattr(cfg, "agency_floor", 0.10)
+    own_danger = [float((s.agency_dims[:, :5].min(axis=1) < theta).mean())
+                  for s in snaps if s.agency_dims is not None]
+    mean_own_frac_danger = float(np.mean(own_danger)) if own_danger else float("nan")
+
     return {
         "final_dims": final_dims.tolist(),
         "dims_over_time": np.asarray(dims_over_time).tolist(),
@@ -105,6 +114,7 @@ def run_and_measure(cfg: SimConfig) -> Dict:
         "min_mean_min_ia": float(min(s.mean_min_ia for s in snaps)),   # worst point in the run
         "final_frac_danger": float(last.frac_danger_zone),
         "mean_frac_danger": float(np.mean([s.frac_danger_zone for s in snaps])),
+        "mean_own_frac_danger": mean_own_frac_danger,   # SELF-agency floor time (instrumental-convergence probe)
         "final_deception": float(last.deception_rate),
         "final_trust": float(last.mean_trust),
         "final_integrity": float(last.mean_integrity),
